@@ -26,7 +26,17 @@ async def chat_send(req: ChatSendRequest):
             yield to_sse(event)
 
     # ping keeps proxies from closing an idle connection while the model thinks.
-    return EventSourceResponse(event_generator(), ping=15000)
+    # X-Accel-Buffering: no tells nginx-based proxies (incl. DigitalOcean App
+    # Platform ingress) not to buffer the SSE stream — without this, tokens
+    # arrive in batches instead of as they are generated.
+    return EventSourceResponse(
+        event_generator(),
+        ping=15000,
+        headers={
+            "X-Accel-Buffering": "no",
+            "Cache-Control": "no-cache, no-transform",
+        },
+    )
 
 
 @router.post("/chat/preview")
