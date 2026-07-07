@@ -30,6 +30,14 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Validate required env vars at startup so the error appears clearly in logs.
+    import os
+    missing = [k for k in ("OPENROUTER_API_KEY", "MONGODB_URI") if not os.environ.get(k, "").strip()]
+    if missing:
+        logger.error("MISSING REQUIRED ENV VARS: %s — set them in the platform environment variables.", missing)
+    else:
+        logger.info("Required env vars verified: OPENROUTER_API_KEY, MONGODB_URI")
+
     # Warm the Mongo connection (also kicks off async index creation) so the
     # first real request isn't paying connection + index cost. Never fatal:
     # if Atlas is briefly unreachable at boot, requests will retry lazily.

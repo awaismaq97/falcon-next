@@ -28,29 +28,30 @@ from dotenv import load_dotenv
 _env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
 load_dotenv(dotenv_path=_env_path, override=False)
 
+import logging as _logging
+_logger = _logging.getLogger(__name__)
+
 # ---------------------------------------------------------------------------
-# Read and validate OPENROUTER_API_KEY
+# Read OPENROUTER_API_KEY — log a warning but do NOT raise at import time.
+# Raising here crashes the server before it can even start, which makes the
+# missing-env-var problem invisible on platforms like DigitalOcean App Platform
+# where env vars are injected at runtime (not build time).
 # ---------------------------------------------------------------------------
 _raw_api_key = os.environ.get("OPENROUTER_API_KEY", "")
-
 if not _raw_api_key or not _raw_api_key.strip():
-    raise ValueError(
-        "OPENROUTER_API_KEY is not set. "
-        "Add your OpenRouter API key to the .env file: OPENROUTER_API_KEY=sk-or-..."
+    _logger.error(
+        "OPENROUTER_API_KEY is not set. Set it in the platform environment variables."
     )
 
 OPENROUTER_API_KEY: str = _raw_api_key
 
 # ---------------------------------------------------------------------------
-# Read and validate MONGODB_URI
+# Read MONGODB_URI
 # ---------------------------------------------------------------------------
 _raw_mongo_uri = os.environ.get("MONGODB_URI", "")
-
 if not _raw_mongo_uri or not _raw_mongo_uri.strip():
-    raise ValueError(
-        "MONGODB_URI is not set. "
-        "Add your MongoDB Atlas connection string to the .env file:\n"
-        "  MONGODB_URI=mongodb+srv://<user>:<password>@<cluster>.mongodb.net/?retryWrites=true&w=majority"
+    _logger.error(
+        "MONGODB_URI is not set. Set it in the platform environment variables."
     )
 
 MONGODB_URI: str = _raw_mongo_uri
