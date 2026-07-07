@@ -25,7 +25,7 @@ services:
   # ── FastAPI backend ──────────────────────────────────────────────────────
   - name: falcon-api
     github:
-      repo: awaismaq97/falcon
+      repo: awaismaq97/falcon-next
       branch: main
       deploy_on_push: true
     source_dir: backend
@@ -67,7 +67,7 @@ services:
   # ── Next.js frontend ─────────────────────────────────────────────────────
   - name: falcon-web
     github:
-      repo: awaismaq97/falcon
+      repo: awaismaq97/falcon-next
       branch: main
       deploy_on_push: true
     source_dir: frontend
