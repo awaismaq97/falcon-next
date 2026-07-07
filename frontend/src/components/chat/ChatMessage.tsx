@@ -21,7 +21,7 @@ function SpeakButton({ id, text }: { id: string; text: string }) {
         "inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[0.72rem] transition-colors",
         playing
           ? "text-[var(--color-accent)]"
-          : "text-[var(--color-fg-subtle)] hover:bg-[var(--color-surface-2)] hover:text-[var(--color-fg)]",
+          : "text-black hover:bg-[var(--color-surface-2)] hover:text-black dark:text-white dark:hover:text-white",
       )}
       title={playing ? "Stop" : loading ? "Synthesising…" : "Read aloud"}
     >
@@ -46,7 +46,7 @@ function CopyButton({ text }: { text: string }) {
           setTimeout(() => setCopied(false), 1100);
         });
       }}
-      className="rounded-md p-1 text-[var(--color-fg-subtle)] hover:bg-[var(--color-surface-2)] hover:text-[var(--color-fg)]"
+      className="rounded-md p-1 text-black hover:bg-[var(--color-surface-2)] hover:text-black dark:text-white dark:hover:text-white"
       title="Copy"
     >
       {copied ? <Check className="h-3.5 w-3.5 text-[var(--color-green)]" /> : <Copy className="h-3.5 w-3.5" />}
@@ -107,7 +107,6 @@ export const ChatMessage = memo(function ChatMessage({
   // timestamp so the button reflects that exact message's playback state.
   const ttsId = message.timestamp || "";
   const canSpeakThis = canSpeak && !!ttsId && !message._suppressed && !!message.content;
-  const ttsActive = useTts((s) => !!ttsId && (s.playingId === ttsId || s.loadingId === ttsId));
 
   if (isUser) {
     return (
@@ -142,18 +141,13 @@ export const ChatMessage = memo(function ChatMessage({
           )}
 
           {!message._streaming && (
-            <div
-              className={cn(
-                "mt-1 flex items-center gap-1 transition-opacity",
-                ttsActive ? "opacity-100" : "opacity-0 group-hover:opacity-100",
-              )}
-            >
+            <div className="mt-1 flex items-center gap-1">
               <CopyButton text={message.content} />
               {canSpeakThis && <SpeakButton id={ttsId} text={message.content} />}
               {hasContext && onOpenContext && (
                 <button
                   onClick={() => onOpenContext(contextTs!)}
-                  className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[0.72rem] text-[var(--color-fg-subtle)] hover:bg-[var(--color-surface-2)] hover:text-[var(--color-fg)]"
+                  className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[0.72rem] text-black hover:bg-[var(--color-surface-2)] hover:text-black dark:text-white dark:hover:text-white"
                   title="View the exact context sent for this turn"
                 >
                   <SlidersHorizontal className="h-3 w-3" /> context
