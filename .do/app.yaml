@@ -43,20 +43,14 @@ services:
     envs:
       - key: OPENROUTER_API_KEY
         scope: RUN_TIME
-        type: SECRET
       - key: MONGODB_URI
         scope: RUN_TIME
-        type: SECRET
       - key: NASA_API_KEY
         scope: RUN_TIME
-        type: SECRET
       - key: WEATHERAPI_KEY
         scope: RUN_TIME
-        type: SECRET
-      # Optional — enables the ElevenLabs text-to-speech voice controls.
       - key: ELEVENLABS_API_KEY
         scope: RUN_TIME
-        type: SECRET
       - key: CORS_ORIGINS
         scope: RUN_TIME
         value: "*"
