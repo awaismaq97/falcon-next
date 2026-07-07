@@ -23,8 +23,10 @@ import yaml
 from dotenv import load_dotenv
 
 # Load .env from the project root (parent of the falcon/ package directory)
+# override=False means real environment variables (injected by the platform)
+# always take precedence over anything in .env.
 _env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
-load_dotenv(dotenv_path=_env_path)
+load_dotenv(dotenv_path=_env_path, override=False)
 
 # ---------------------------------------------------------------------------
 # Read and validate OPENROUTER_API_KEY
