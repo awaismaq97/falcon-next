@@ -1,0 +1,85 @@
+# DigitalOcean App Platform spec for Falcon (Next.js + FastAPI).
+#
+# Two services from ONE repo, both auto-deploying on git push:
+#   • falcon-api  (FastAPI)  — owns the /api ingress path (prefix preserved)
+#   • falcon-web  (Next.js)  — owns everything else ( / )
+#
+# The frontend calls relative "/api/..." which the ingress routes to the API
+# service, so there is no CORS or cross-origin config in production.
+#
+# Apply it:
+#   Existing app (recommended — keeps your URL & env vars):
+#     doctl apps update <APP_ID> --spec .do/app.yaml
+#     (or Dashboard → your app → Settings → "Edit App Spec" → paste this file)
+#   New app:
+#     doctl apps create --spec .do/app.yaml
+#
+# Set the secret values (OPENROUTER_API_KEY, MONGODB_URI, NASA_API_KEY,
+# WEATHERAPI_KEY) in the Dashboard → App → Settings → App-Level Environment
+# Variables (encrypted). They are declared below as SECRET with no committed value.
+
+name: falcon
+region: nyc
+
+services:
+  # ── FastAPI backend ──────────────────────────────────────────────────────
+  - name: falcon-api
+    github:
+      repo: awaismaq97/falcon
+      branch: main
+      deploy_on_push: true
+    source_dir: backend
+    dockerfile_path: backend/Dockerfile
+    http_port: 8080
+    instance_count: 1
+    instance_size_slug: apps-s-1vcpu-1gb
+    routes:
+      - path: /api
+        preserve_path_prefix: true
+    health_check:
+      http_path: /health
+      initial_delay_seconds: 20
+      period_seconds: 15
+    envs:
+      - key: OPENROUTER_API_KEY
+        scope: RUN_TIME
+        type: SECRET
+      - key: MONGODB_URI
+        scope: RUN_TIME
+        type: SECRET
+      - key: NASA_API_KEY
+        scope: RUN_TIME
+        type: SECRET
+      - key: WEATHERAPI_KEY
+        scope: RUN_TIME
+        type: SECRET
+      # Optional — enables the ElevenLabs text-to-speech voice controls.
+      - key: ELEVENLABS_API_KEY
+        scope: RUN_TIME
+        type: SECRET
+      - key: CORS_ORIGINS
+        scope: RUN_TIME
+        value: "*"
+      - key: ENABLE_DOCS
+        scope: RUN_TIME
+        value: "false"
+
+  # ── Next.js frontend ─────────────────────────────────────────────────────
+  - name: falcon-web
+    github:
+      repo: awaismaq97/falcon
+      branch: main
+      deploy_on_push: true
+    source_dir: frontend
+    dockerfile_path: frontend/Dockerfile
+    http_port: 3000
+    instance_count: 1
+    instance_size_slug: apps-s-1vcpu-0.5gb
+    routes:
+      - path: /
+    # NEXT_PUBLIC_API_BASE is intentionally left unset → the app uses relative
+    # /api paths, routed to falcon-api by the ingress above.
+    envs:
+      - key: NEXT_TELEMETRY_DISABLED
+        scope: BUILD_TIME
+        value: "1"
