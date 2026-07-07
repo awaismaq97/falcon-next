@@ -29,4 +29,4 @@ EXPOSE 8000
 # One worker: background daemon threads (audit, extraction, dual-run) and the
 # in-process Mongo client are per-process; scale out with more instances, not
 # more workers, so those threads aren't duplicated per request cycle.
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+CMD ["sh", "-c", "echo '=== ENV DEBUG ===' && echo OPENROUTER_API_KEY=${OPENROUTER_API_KEY:0:8}... && echo MONGODB_URI=${MONGODB_URI:0:20}... && echo PORT=$PORT && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
