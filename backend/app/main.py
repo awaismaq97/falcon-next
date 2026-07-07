@@ -85,6 +85,15 @@ def create_app() -> FastAPI:
     async def health():
         return {"status": "ok", "service": "falcon-api", "version": settings.app_version}
 
+    @app.get("/debug-env", tags=["meta"])
+    async def debug_env():
+        import os
+        return {
+            "OPENROUTER_API_KEY": os.environ.get("OPENROUTER_API_KEY", "NOT SET"),
+            "MONGODB_URI": os.environ.get("MONGODB_URI", "NOT SET"),
+            "all_keys": [k for k in os.environ.keys()],
+        }
+
     # ── Routers ────────────────────────────────────────────────────────────
     from app.routers import (
         audit,
