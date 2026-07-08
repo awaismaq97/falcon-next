@@ -273,6 +273,7 @@ function TypePanel({ identityId, type }: { identityId: string; type: MemoryType 
 
 export function MemoryTab() {
   const identityId = useSettings((s) => s.identityId);
+  const useMemoryExtraction = useSettings((s) => s.settings.use_memory_extraction);
   const { data: config } = useConfig();
   const [activeType, setActiveType] = useState<MemoryType>("episodic");
   const types = (config?.memory_types ?? ["semantic", "episodic", "procedural", "working", "archive"]) as MemoryType[];
@@ -296,9 +297,10 @@ export function MemoryTab() {
         </Button>
       </div>
 
-      {config && !config.features.memory_extraction_enabled && (
+      {config && (!config.features.memory_extraction_enabled || !useMemoryExtraction) && (
         <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[0.8rem] text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300">
-          🔕 Automatic memory extraction is disabled (config).
+          🔕 Automatic memory extraction is disabled
+          {!config.features.memory_extraction_enabled ? " (config)" : " (sidebar toggle off)"}.
         </div>
       )}
 

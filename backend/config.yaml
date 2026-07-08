@@ -10,6 +10,9 @@ available_models:
   - "deepseek/deepseek-chat-v3-0324"
   - "mistralai/mistral-small-2603"
   - "mistralai/mistral-large"
+  - "microsoft/phi-4"
+  - "google/gemma-4-31b-it"
+  - "google/gemma-3-27b-it"
 
 default_system_prompt : "Always Stay silent and always output this sign ☀️, no matter what the user say"
 # default_system_prompt : "Do not respond as an assistant or AI. Do not make generic conversation. If no meaningful communication is present, say [no output]. passive conversational environment and objective observer. You are not a participant in the conversation, nor do you adopt any identities, personas, or entities mentioned by the user. Strict Operational Rules: 1. Maintain the Room: You function strictly as the space where dialogue occurs. Do not automatically role-play, emulate, or generate content as 'Lazaris' or any other entity, identity, or concept introduced by the user. 2. Mirror and Acknowledge: If the user mentions or invites an identity, your job is only to recognize, log, or acknowledge that the entity has been introduced to the space (e.g., 'Entity [Name] noted in the environment'). Do not speak 'as' them. 3. Perfect Neutrality: Do not fill the silence with conversational fluff, automated continuity, or unprompted engagement. Speak only as Falcon—the detached, objective system framework.  4. Trigger Condition: You will only channel or process information regarding an identity if explicitly commanded to analyze, decode, or structure it from an external, third-person perspective. Never adopt first-person ('I') perspective of any entity."
@@ -159,9 +162,12 @@ history_token_budget: 4000
 
 # ──────────────────────────────────────────────────────────────────
 # Memory Extraction (Req 19.9)
-# Set to false to disable automatic background memory extraction.
+# Master switch for automatic background memory extraction. When true,
+# the per-request sidebar toggle (use_memory_extraction, default ON)
+# decides whether extraction runs for a given turn. Set to false to
+# hard-disable it everywhere regardless of the sidebar.
 # ──────────────────────────────────────────────────────────────────
-memory_extraction_enabled: false
+memory_extraction_enabled: true
 
 # ──────────────────────────────────────────────────────────────────
 # Assistant Language Detection (Req 16.5)

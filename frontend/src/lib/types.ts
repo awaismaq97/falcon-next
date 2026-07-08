@@ -27,6 +27,7 @@ export interface ChatSettings {
   use_tools: boolean;
   use_judge: boolean;
   judge_model: string | null;
+  use_memory_extraction: boolean;
   dual_run_enabled: boolean;
   dual_run_state_tag: string;
   generation: GenerationSettings;

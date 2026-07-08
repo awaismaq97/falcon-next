@@ -295,6 +295,24 @@ export function Sidebar({ dark, onToggleDark }: { dark: boolean; onToggleDark: (
         }
       />
 
+      {/* Memory Extraction */}
+      <SectionLabel>Memory Extraction</SectionLabel>
+      <Toggle
+        label="Auto-extract memory"
+        checked={settings.use_memory_extraction}
+        onCheckedChange={(v) => update({ use_memory_extraction: v })}
+        hint={
+          settings.use_memory_extraction
+            ? `ON — user facts saved after each turn via ${shortModel(config?.extraction_model ?? "openai/gpt-4o-mini")}`
+            : "OFF — no automatic memory extraction"
+        }
+      />
+      {settings.use_memory_extraction && (
+        <div className="mt-1 text-[0.72rem] text-[var(--color-fg-subtle)]">
+          model · {shortModel(config?.extraction_model ?? "openai/gpt-4o-mini")}
+        </div>
+      )}
+
       {/* History Truncation */}
       <SectionLabel>History Truncation</SectionLabel>
       <Input

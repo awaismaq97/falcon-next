@@ -38,6 +38,8 @@ class ChatSettings(BaseModel):
     use_tools: bool = True
     use_judge: bool = False
     judge_model: str | None = None
+    # Background memory extraction after each turn (gpt-4o-mini via config).
+    use_memory_extraction: bool = True
     dual_run_enabled: bool = False
     dual_run_state_tag: str = "Neutral"
     generation: GenerationSettings = Field(default_factory=GenerationSettings)

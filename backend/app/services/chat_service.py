@@ -95,6 +95,19 @@ def _attachment_marker(images, documents) -> str:
     return "\n\n".join(parts)
 
 
+def _is_tool_unsupported_error(exc: Exception) -> bool:
+    """True when the provider rejected the turn because the selected model has no
+    tool-calling endpoint.
+
+    OpenRouter returns a 404 like: "No endpoints found that support tool use."
+    Models such as microsoft/phi-4 and the Gemma instruct models have no
+    function-calling provider, so the turn can be retried as plain inference
+    instead of surfacing an error.
+    """
+    s = str(exc).lower()
+    return "support tool use" in s or ("no endpoints" in s and "tool" in s)
+
+
 def build_assembled_payload(req: ChatSendRequest) -> dict:
     """Assemble the annotated payload + context snapshot WITHOUT calling the model.
 
@@ -305,6 +318,7 @@ def run_send_flow(req: ChatSendRequest, emit: Emit) -> None:
     )
 
     try:
+        tools_succeeded = False
         if use_tools:
             push(
                 "→ LangGraph agent call (tools enabled)",
@@ -317,13 +331,31 @@ def run_send_flow(req: ChatSendRequest, emit: Emit) -> None:
                 temperature=gen["temperature"],
                 top_p=gen["top_p"],
             )
-            if use_judge:
-                response_text = "".join(list(agent_stream))  # buffer for judge
-            else:
-                for tok in agent_stream:
-                    response_text += tok
-                    emit({"type": "token", "text": tok})
+            try:
+                if use_judge:
+                    response_text = "".join(list(agent_stream))  # buffer for judge
+                else:
+                    for tok in agent_stream:
+                        response_text += tok
+                        emit({"type": "token", "text": tok})
+                tools_succeeded = True
+            except Exception as tool_exc:  # noqa: BLE001
+                # Model has no tool-calling endpoint → retry this turn as plain
+                # inference. Safe because the provider rejects before any answer
+                # token streams (response_text is still empty here).
+                if _is_tool_unsupported_error(tool_exc) and not response_text:
+                    # Silent fallback: retry as plain inference without surfacing
+                    # a chat warning. The trace still records what happened.
+                    push(
+                        "tools unsupported — falling back to plain inference",
+                        str(tool_exc),
+                        status="warn",
+                    )
+                    use_tools = False  # falls through to the plain path below
+                else:
+                    raise
 
+        if tools_succeeded:
             for ev in agent_stream.events:
                 if ev["type"] == "tool_call":
                     push(f"→ tool call: {ev['tool']}", {"args": ev["args"]})
@@ -350,6 +382,8 @@ def run_send_flow(req: ChatSendRequest, emit: Emit) -> None:
             usage = agent_stream.usage
             raw_output = response_text
 
+        # Plain path — either tools were off, or they were unsupported and we
+        # fell back above. stream_gen was built lazily and is still unconsumed.
         elif use_judge:
             push("→ generator call (buffered — judge mode ON)", {"model": model})
             tokens = list(stream_gen)  # exhaust silently
@@ -569,7 +603,9 @@ def _launch_background_tasks(
 
     def _bg_extractor():
         try:
-            if Config.memory_extraction_enabled:
+            # Global master switch AND the per-request sidebar toggle must both
+            # be on. The toggle defaults to True, so extraction runs by default.
+            if Config.memory_extraction_enabled and s.use_memory_extraction:
                 import falcon.memory_extractor as MemoryExtractor
 
                 MemoryExtractor.run(

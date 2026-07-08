@@ -34,6 +34,7 @@ const DEFAULT_SETTINGS: ChatSettings = {
   use_tools: true,
   use_judge: false,
   judge_model: null,
+  use_memory_extraction: true,
   dual_run_enabled: false,
   dual_run_state_tag: "Neutral",
   generation: { temperature: 0, top_p: 1, repetition_penalty: 1, stop_tokens: [] },
