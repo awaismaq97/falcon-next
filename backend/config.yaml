@@ -1,4 +1,4 @@
-default_model: "qwen/qwen-2.5-72b-instruct"
+default_model: "qwen/qwen3.6-35b-a3b"
 
 available_models:
   - "qwen/qwen-2.5-72b-instruct"
