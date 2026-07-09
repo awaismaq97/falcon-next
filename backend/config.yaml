@@ -1,11 +1,11 @@
 default_model: "qwen/qwen3.6-35b-a3b"
 
 available_models:
-  # - "qwen/qwen-2.5-72b-instruct"
-  # - "qwen/qwen3.6-27b"
+  - "qwen/qwen-2.5-72b-instruct"
+  - "qwen/qwen3.6-27b"
   - "qwen/qwen3.6-35b-a3b"
-  # - "qwen/qwen3-235b-a22b-2507"
-  # - "meta-llama/llama-4-scout"
+  - "qwen/qwen3-235b-a22b-2507"
+  - "meta-llama/llama-4-scout"
   # - "meta-llama/llama-3.3-70b-instruct"
   # - "meta-llama/llama-3.1-70b-instruct"
   # - "deepseek/deepseek-v4-flash"
