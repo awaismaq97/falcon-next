@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { type ClipboardEvent, useRef, useState } from "react";
 import { ArrowUp, Paperclip, X, Square, FileText, Loader2, AlertCircle } from "lucide-react";
 import { api } from "@/lib/api";
 import type { DocAttachment } from "@/lib/types";
@@ -139,6 +139,25 @@ export function ChatInput({
     }
   }
 
+  // Paste-to-attach: route pasted image/file data through the same addFiles
+  // path the paperclip button uses. Only intercept when the clipboard actually
+  // carries files (e.g. a pasted screenshot) so plain text paste is untouched.
+  function handlePaste(e: ClipboardEvent<HTMLTextAreaElement>) {
+    const cd = e.clipboardData;
+    const files =
+      cd.files && cd.files.length
+        ? Array.from(cd.files)
+        : Array.from(cd.items)
+            .filter((it) => it.kind === "file")
+            .map((it) => it.getAsFile())
+            .filter((f): f is File => f != null);
+    if (!files.length) return;
+    e.preventDefault();
+    const dt = new DataTransfer();
+    files.forEach((f) => dt.items.add(f));
+    addFiles(dt.files);
+  }
+
   const docsExtracting = atts.some((a) => a.kind === "doc" && a.status === "extracting");
   const images = atts.filter((a): a is ImageAtt => a.kind === "image");
   const readyDocs = atts.filter((a): a is DocAtt => a.kind === "doc" && a.status === "ready");
@@ -205,6 +224,7 @@ export function ChatInput({
                 submit();
               }
             }}
+            onPaste={handlePaste}
             rows={1}
             placeholder="Message…"
             className="max-h-[200px] flex-1 resize-none bg-transparent py-1.5 text-[0.93rem] text-[var(--color-fg)] outline-none placeholder:text-[var(--color-fg-subtle)]"
