@@ -110,6 +110,21 @@ class PersonaUpdateRequest(BaseModel):
     core_traits: str = ""
 
 
+class PersonaSaveRequest(BaseModel):
+    """Create/update a persona in the multi-persona editor.
+
+    Same structured fields as PersonaUpdateRequest plus `pinned` — pinning is
+    how a persona is marked active. When one or more personas are pinned, all
+    pinned personas are composed together; when none are, the most recent
+    persona is used (single-persona behaviour).
+    """
+    name: str = ""
+    tone: str = ""
+    communication_style: str = ""
+    core_traits: str = ""
+    pinned: bool = False
+
+
 class RetrievalTestRequest(BaseModel):
     query: str = ""
     use_persona: bool = True

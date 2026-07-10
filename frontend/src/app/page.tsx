@@ -15,6 +15,7 @@ import { AuditTab } from "@/components/tabs/AuditTab";
 import { LogsTab } from "@/components/tabs/LogsTab";
 import { TestingTab } from "@/components/tabs/TestingTab";
 import { DualRunTab } from "@/components/tabs/DualRunTab";
+import { PolyMarketTab } from "@/components/tabs/PolyMarketTab";
 
 const TABS = [
   { id: "chat", label: "Chat" },
@@ -24,6 +25,7 @@ const TABS = [
   { id: "logs", label: "Logs" },
   { id: "testing", label: "Testing" },
   { id: "dualrun", label: "Dual Run" },
+  { id: "polymarket", label: "Poly Market" },
 ];
 
 export default function Home() {
@@ -132,6 +134,9 @@ export default function Home() {
             </Tabs.Content>
             <Tabs.Content value="dualrun" className="h-full overflow-y-auto data-[state=inactive]:hidden">
               <DualRunTab />
+            </Tabs.Content>
+            <Tabs.Content value="polymarket" className="h-full data-[state=inactive]:hidden">
+              <PolyMarketTab />
             </Tabs.Content>
           </div>
         </Tabs.Root>

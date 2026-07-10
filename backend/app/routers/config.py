@@ -64,7 +64,7 @@ def get_config() -> dict:
             # Sidebar defaults matching the Streamlit app's session defaults.
             "default_use_tools": True,
             "default_use_judge": False,
-            "default_use_persona": False,
+            "default_use_persona": True,
             "default_use_system_prompt": False,
         },
         "retrieval": {

@@ -333,12 +333,23 @@ def retrieve_for_generation(
     for d in cursor:
         docs_by_type.setdefault(d.get("memory_type", ""), []).append(_doc_to_dict(d))
 
-    # ── Persona: always prepend if exists; never scored ───────────────────
-    persona_entry: dict | None = None
-    persona_docs = docs_by_type.get(_PERSONA_TYPE)
+    # ── Persona(s): always prepended, never scored ────────────────────────
+    # An identity may hold multiple persona entries. If any are pinned, ALL
+    # pinned personas are active and composed together (in creation order, so a
+    # base persona defined first leads). If none are pinned, fall back to the
+    # single most-recent persona — the original one-persona behaviour, left
+    # unchanged for existing identities.
+    persona_active: list[dict] = []
+    persona_docs = docs_by_type.get(_PERSONA_TYPE, [])
     if persona_docs:
-        persona_entry = persona_docs[0]
-        by_type[_PERSONA_TYPE] = [persona_entry]
+        pinned_personas = [p for p in persona_docs if p.get("pinned")]
+        if pinned_personas:
+            # docs_by_type is newest-first; reverse so the earliest-created
+            # active persona leads the composition.
+            persona_active = list(reversed(pinned_personas))
+        else:
+            persona_active = [persona_docs[0]]
+        by_type[_PERSONA_TYPE] = persona_active
 
     # ── Active types: weighted scoring ────────────────────────────────────
     for mem_type in _ACTIVE_TYPES:
@@ -384,11 +395,11 @@ def retrieve_for_generation(
             reason = e.get("match_reason", "recency")
             reasoning.append(f"{mem_type}/{eid}: score={score}, reason={reason}")
 
-    # ── Prepend persona to entries (after scoring loop) ───────────────────
-    if persona_entry is not None:
-        entries = [persona_entry] + entries
+    # ── Prepend persona(s) to entries (after scoring loop) ────────────────
+    if persona_active:
+        entries = persona_active + entries
 
-    if not entries and persona_entry is None:
+    if not entries:
         reasoning.append("No memory entries found for this identity.")
 
     return RetrievalResult(

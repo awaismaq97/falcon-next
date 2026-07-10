@@ -14,6 +14,7 @@ import falcon.memory as Memory
 from app.schemas import (
     MemoryCreateRequest,
     MemoryUpdateRequest,
+    PersonaSaveRequest,
     PersonaUpdateRequest,
     RetrievalTestRequest,
 )
@@ -162,6 +163,81 @@ def save_persona(identity_id: str, req: PersonaUpdateRequest) -> dict:
         source="user",
     )
     return {"_id": mem_id, "raw": content}
+
+
+# ---------------------------------------------------------------------------
+# Personas (multi-persona) — an identity may hold several personas; pinning
+# marks which are active. Mirrors the composition rule in
+# memory.retrieve_for_generation so the editor's "active" flags match exactly
+# what gets composed into the payload.
+# ---------------------------------------------------------------------------
+
+def _active_persona_ids(personas: list[dict]) -> set[str]:
+    """IDs of the personas that will actually be composed into the payload.
+
+    `personas` must be newest-first (as get_memories returns). If any are
+    pinned, all pinned ones are active; otherwise the single most-recent one is.
+    """
+    if not personas:
+        return set()
+    pinned = [p for p in personas if p.get("pinned")]
+    if pinned:
+        return {p["_id"] for p in pinned}
+    return {personas[0]["_id"]}
+
+
+@router.get("/identities/{identity_id}/personas")
+def list_personas(identity_id: str) -> dict:
+    entries = Memory.get_memories(identity_id, memory_type="persona", limit=1000)
+    active = _active_persona_ids(entries)
+    personas = [
+        {
+            "_id": e["_id"],
+            "fields": parse_persona(e.get("content", "")),
+            "raw": e.get("content", ""),
+            "pinned": bool(e.get("pinned")),
+            "active": e["_id"] in active,
+            "created_at": e.get("created_at"),
+        }
+        for e in entries
+    ]
+    return {
+        "identity_id": identity_id,
+        "personas": personas,
+        "count": len(personas),
+        # Pre-fill values for a brand-new persona when none exist yet.
+        "default_fields": parse_persona(Config.default_persona_startup_content),
+    }
+
+
+@router.post("/identities/{identity_id}/personas", status_code=201)
+def create_persona(identity_id: str, req: PersonaSaveRequest) -> dict:
+    content = assemble_persona(req)
+    mem_id = Memory.add_memory(
+        identity_id=identity_id,
+        memory_type="persona",
+        content=content,
+        pinned=req.pinned,
+        source="user",
+    )
+    return {"_id": mem_id, "raw": content, "pinned": req.pinned}
+
+
+@router.put("/personas/{memory_id}")
+def update_persona(memory_id: str, req: PersonaSaveRequest) -> dict:
+    content = assemble_persona(req)
+    ok = Memory.update_memory(memory_id, content=content, pinned=req.pinned)
+    if not ok:
+        raise HTTPException(404, "Persona not found.")
+    return {"_id": memory_id, "raw": content, "pinned": req.pinned}
+
+
+@router.delete("/personas/{memory_id}")
+def delete_persona(memory_id: str) -> dict:
+    ok = Memory.delete_memory(memory_id)
+    if not ok:
+        raise HTTPException(404, "Persona not found.")
+    return {"deleted": memory_id}
 
 
 # ---------------------------------------------------------------------------

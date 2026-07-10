@@ -1,37 +1,41 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import * as Tabs from "@radix-ui/react-tabs";
 import { useQueryClient } from "@tanstack/react-query";
 import { Download, Pin, PinOff, Trash2, Save, Search, Plus } from "lucide-react";
 import { api } from "@/lib/api";
-import { useConfig, useMemory, usePersona } from "@/lib/queries";
+import { useConfig, useMemory, usePersonas } from "@/lib/queries";
 import { useSettings } from "@/lib/store";
-import type { MemoryEntry, MemoryType, PersonaFields, RetrievalResult } from "@/lib/types";
+import type { MemoryEntry, MemoryType, PersonaFields, PersonaSummary, RetrievalResult } from "@/lib/types";
 import { Button, Input, Textarea, Badge, Spinner, Card } from "@/components/ui/primitives";
 import { JsonView } from "@/components/JsonView";
 import { cn, downloadJSON } from "@/lib/utils";
 import { toast } from "@/components/ui/toast";
 
-function PersonaEditor({ identityId }: { identityId: string }) {
-  const { data, isLoading } = usePersona(identityId);
-  const qc = useQueryClient();
-  const [fields, setFields] = useState<PersonaFields>({ name: "", tone: "", communication_style: "", core_traits: "" });
+const EMPTY_PERSONA: PersonaFields = { name: "", tone: "", communication_style: "", core_traits: "" };
+
+function PersonaForm({
+  initial,
+  initialPinned,
+  submitLabel,
+  onSubmit,
+  onCancel,
+}: {
+  initial: PersonaFields;
+  initialPinned: boolean;
+  submitLabel: string;
+  onSubmit: (fields: PersonaFields, pinned: boolean) => Promise<void>;
+  onCancel?: () => void;
+}) {
+  const [fields, setFields] = useState<PersonaFields>(initial);
+  const [pinned, setPinned] = useState(initialPinned);
   const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
 
-  useEffect(() => {
-    if (data) setFields(data.fields);
-  }, [data]);
-
-  async function save() {
+  async function submit() {
     setSaving(true);
     try {
-      await api.savePersona(identityId, fields);
-      qc.invalidateQueries({ queryKey: ["persona", identityId] });
-      qc.invalidateQueries({ queryKey: ["memory", identityId] });
-      setSaved(true);
-      setTimeout(() => setSaved(false), 1500);
+      await onSubmit(fields, pinned);
     } catch (e) {
       toast.error((e as Error).message);
     } finally {
@@ -39,13 +43,8 @@ function PersonaEditor({ identityId }: { identityId: string }) {
     }
   }
 
-  if (isLoading) return <Spinner />;
-
   return (
-    <Card>
-      <div className="mb-2 flex items-center justify-between">
-        <h3 className="text-[0.9rem] font-semibold">Persona {data?.exists ? "" : "(not saved yet — from config defaults)"}</h3>
-      </div>
+    <div className="space-y-2.5">
       <div className="grid gap-2.5 sm:grid-cols-2">
         <label className="block">
           <span className="mb-1 block text-[0.72rem] text-[var(--color-fg-muted)]">Name</span>
@@ -56,14 +55,14 @@ function PersonaEditor({ identityId }: { identityId: string }) {
           <Input value={fields.tone} onChange={(e) => setFields({ ...fields, tone: e.target.value })} />
         </label>
       </div>
-      <label className="mt-2.5 block">
+      <label className="block">
         <span className="mb-1 block text-[0.72rem] text-[var(--color-fg-muted)]">Communication style</span>
         <Input
           value={fields.communication_style}
           onChange={(e) => setFields({ ...fields, communication_style: e.target.value })}
         />
       </label>
-      <label className="mt-2.5 block">
+      <label className="block">
         <span className="mb-1 block text-[0.72rem] text-[var(--color-fg-muted)]">Core traits</span>
         <Textarea
           rows={5}
@@ -71,10 +70,183 @@ function PersonaEditor({ identityId }: { identityId: string }) {
           onChange={(e) => setFields({ ...fields, core_traits: e.target.value })}
         />
       </label>
-      <div className="mt-3">
-        <Button variant="primary" size="sm" onClick={save} loading={saving}>
-          <Save className="h-3.5 w-3.5" /> {saved ? "Saved!" : "Save persona"}
+      <label className="flex items-center gap-1.5 text-[0.78rem] text-[var(--color-fg-muted)]">
+        <input type="checkbox" checked={pinned} onChange={(e) => setPinned(e.target.checked)} />
+        Active (pin to compose this persona into the payload)
+      </label>
+      <div className="flex gap-2">
+        <Button variant="primary" size="sm" onClick={submit} loading={saving}>
+          <Save className="h-3.5 w-3.5" /> {submitLabel}
         </Button>
+        {onCancel && (
+          <Button variant="ghost" size="sm" onClick={onCancel}>
+            Cancel
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function PersonaRow({
+  persona,
+  onTogglePin,
+  onEdit,
+  onDelete,
+}: {
+  persona: PersonaSummary;
+  onTogglePin: () => void;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-2.5">
+      <div className="flex items-center gap-1.5">
+        <span className="min-w-0 truncate text-[0.85rem] font-medium">
+          {persona.fields.name || <span className="text-[var(--color-fg-subtle)]">Unnamed persona</span>}
+        </span>
+        {persona.active && <Badge color="green">active</Badge>}
+        {persona.pinned && <Badge color="amber">pinned</Badge>}
+        <span className="ml-auto flex items-center gap-0.5">
+          <button
+            onClick={onTogglePin}
+            className="rounded p-1 text-[var(--color-fg-subtle)] hover:text-[var(--color-fg)]"
+            title={persona.pinned ? "Unpin (deactivate)" : "Pin (activate)"}
+          >
+            {persona.pinned ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}
+          </button>
+          <button
+            onClick={onEdit}
+            className="rounded px-1.5 py-1 text-[0.72rem] text-[var(--color-fg-subtle)] hover:text-[var(--color-fg)]"
+          >
+            edit
+          </button>
+          <button
+            onClick={onDelete}
+            className="rounded p-1 text-[var(--color-fg-subtle)] hover:text-[var(--color-red)]"
+            title="Delete"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </button>
+        </span>
+      </div>
+      {(persona.fields.tone || persona.fields.communication_style) && (
+        <div className="mt-1 truncate text-[0.76rem] text-[var(--color-fg-subtle)]">
+          {[persona.fields.tone, persona.fields.communication_style].filter(Boolean).join(" · ")}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PersonaManager({ identityId }: { identityId: string }) {
+  const { data, isLoading } = usePersonas(identityId);
+  const qc = useQueryClient();
+  const [adding, setAdding] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ["personas", identityId] });
+    qc.invalidateQueries({ queryKey: ["memory", identityId] });
+    qc.invalidateQueries({ queryKey: ["latest-context", identityId] });
+  };
+
+  const personas = data?.personas ?? [];
+  const activeCount = personas.filter((p) => p.active).length;
+  const anyPinned = personas.some((p) => p.pinned);
+
+  async function togglePin(p: PersonaSummary) {
+    try {
+      await api.updateMemory(p._id, { pinned: !p.pinned });
+      refresh();
+    } catch (e) {
+      toast.error((e as Error).message);
+    }
+  }
+  async function remove(p: PersonaSummary) {
+    if (!confirm(`Delete persona "${p.fields.name || "Unnamed"}"?`)) return;
+    try {
+      await api.deletePersona(p._id);
+      if (editingId === p._id) setEditingId(null);
+      refresh();
+    } catch (e) {
+      toast.error((e as Error).message);
+    }
+  }
+
+  if (isLoading) return <Spinner />;
+
+  return (
+    <Card>
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <h3 className="text-[0.9rem] font-semibold">
+          Personas{" "}
+          <span className="font-normal text-[var(--color-fg-subtle)]">
+            ({personas.length}, {activeCount} active)
+          </span>
+        </h3>
+        {!adding && (
+          <Button size="sm" variant="secondary" onClick={() => { setAdding(true); setEditingId(null); }}>
+            <Plus className="h-3.5 w-3.5" /> Add persona
+          </Button>
+        )}
+      </div>
+
+      <p className="mb-3 text-[0.74rem] leading-snug text-[var(--color-fg-subtle)]">
+        {anyPinned
+          ? "Pinned personas are composed together into the payload, each in its own labelled block."
+          : "No personas pinned — the most recent persona is used. Pin one or more to compose several at once."}
+      </p>
+
+      {adding && (
+        <div className="mb-3 rounded-lg border border-[var(--color-border)] p-2.5">
+          <div className="mb-2 text-[0.8rem] font-semibold">New persona</div>
+          <PersonaForm
+            initial={data?.default_fields ?? EMPTY_PERSONA}
+            initialPinned={personas.length === 0}
+            submitLabel="Create persona"
+            onCancel={() => setAdding(false)}
+            onSubmit={async (fields, pinned) => {
+              await api.createPersona(identityId, { ...fields, pinned });
+              setAdding(false);
+              refresh();
+            }}
+          />
+        </div>
+      )}
+
+      <div className="space-y-1.5">
+        {personas.length === 0 && !adding && (
+          <div className="text-[0.8rem] text-[var(--color-fg-subtle)]">
+            No personas yet. Add one to define this identity&apos;s behavior.
+          </div>
+        )}
+        {personas.map((p) =>
+          editingId === p._id ? (
+            <div key={p._id} className="rounded-lg border border-[var(--color-border)] p-2.5">
+              <div className="mb-2 text-[0.8rem] font-semibold">Edit persona</div>
+              <PersonaForm
+                initial={p.fields}
+                initialPinned={p.pinned}
+                submitLabel="Save persona"
+                onCancel={() => setEditingId(null)}
+                onSubmit={async (fields, pinned) => {
+                  await api.updatePersona(p._id, { ...fields, pinned });
+                  setEditingId(null);
+                  refresh();
+                }}
+              />
+            </div>
+          ) : (
+            <PersonaRow
+              key={p._id}
+              persona={p}
+              onTogglePin={() => togglePin(p)}
+              onEdit={() => { setEditingId(p._id); setAdding(false); }}
+              onDelete={() => remove(p)}
+            />
+          ),
+        )}
       </div>
     </Card>
   );
@@ -305,7 +477,7 @@ export function MemoryTab() {
       )}
 
       <RetrievalTester identityId={identityId} />
-      <PersonaEditor identityId={identityId} />
+      <PersonaManager identityId={identityId} />
 
       <Tabs.Root value={activeType} onValueChange={(v) => setActiveType(v as MemoryType)}>
         <Tabs.List className="flex gap-1 border-b border-[var(--color-border)]">

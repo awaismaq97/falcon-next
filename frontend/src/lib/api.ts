@@ -16,6 +16,7 @@ import type {
   MemoryType,
   Message,
   PersonaFields,
+  PersonasResponse,
   RetrievalResult,
   TestDef,
   TestRun,
@@ -205,6 +206,20 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(fields),
     }),
+  listPersonas: (id: string) =>
+    req<PersonasResponse>(`/api/identities/${encodeURIComponent(id)}/personas`),
+  createPersona: (id: string, body: PersonaFields & { pinned: boolean }) =>
+    req<{ _id: string; raw: string; pinned: boolean }>(
+      `/api/identities/${encodeURIComponent(id)}/personas`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  updatePersona: (memId: string, body: PersonaFields & { pinned: boolean }) =>
+    req<{ _id: string; raw: string; pinned: boolean }>(`/api/personas/${memId}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  deletePersona: (memId: string) =>
+    req<{ deleted: string }>(`/api/personas/${memId}`, { method: "DELETE" }),
   testRetrieval: (id: string, query: string, use_persona: boolean) =>
     req<RetrievalResult>(`/api/identities/${encodeURIComponent(id)}/memory/retrieve`, {
       method: "POST",

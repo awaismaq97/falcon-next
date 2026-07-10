@@ -224,12 +224,13 @@ def build_annotated_payload(
             logger.error("retrieve_for_generation raised: %s", exc)
             memory_block = []
 
-    # Separate persona from other memory entries
-    persona_entry: dict | None = None
+    # Separate persona(s) from other memory entries. An identity may have more
+    # than one active persona; all are composed, each in its own labelled block.
+    persona_entries: list[dict] = []
     non_persona_memory: list[dict] = []
     for entry in memory_block:
         if entry.get("memory_type") == "persona":
-            persona_entry = entry
+            persona_entries.append(entry)
         else:
             non_persona_memory.append(entry)
 
@@ -260,17 +261,25 @@ def build_annotated_payload(
             history, history_max_turns
         )
 
-    # 1. Persona block
-    if persona_entry is not None:
-        raw_persona = persona_entry.get("content", "").strip()
-        persona_content = (
-            "[PERSONA — this defines your identity and behavior. "
-            "Adopt it completely for this conversation.]\n"
-            + raw_persona
-        )
+    # 1. Persona block(s) — one labelled system block per active persona.
+    # A single persona keeps the exact original label (byte-identical) so
+    # existing behaviour is unchanged; multiple personas are numbered.
+    n_personas = len(persona_entries)
+    for idx, pe in enumerate(persona_entries, start=1):
+        raw_persona = pe.get("content", "").strip()
+        if n_personas == 1:
+            header = (
+                "[PERSONA — this defines your identity and behavior. "
+                "Adopt it completely for this conversation.]"
+            )
+        else:
+            header = (
+                f"[PERSONA {idx}/{n_personas} — one of several active personas. "
+                "Hold all of them together for this conversation.]"
+            )
         annotated.append({
             "role":    "system",
-            "content": persona_content,
+            "content": header + "\n" + raw_persona,
             "source":  "persona",
         })
 
@@ -337,13 +346,15 @@ def build_annotated_payload(
     context_text = " ".join(e.get("content", "") for e in assembled_payload)
     context_token_estimate = _estimate_tokens(context_text)
 
-    persona_block = next((e for e in annotated if e.get("source") == "persona"), None)
+    persona_blocks = [e for e in annotated if e.get("source") == "persona"]
+    persona_block = persona_blocks[0] if persona_blocks else None
     system_prompt_val = system_prompt if (system_prompt and system_prompt.strip()) else None
 
     context_snapshot: dict = {
         "system_prompt":           system_prompt_val,
         "prompt_state":            "present" if system_prompt_val else "empty",
         "persona_block":           persona_block,
+        "persona_blocks":          persona_blocks,
         "memory_entries":          [e for e in annotated if e.get("source") == "memory"],
         "history_included":        [e for e in annotated if e.get("source") == "history"],
         "history_dropped_turns":   history_dropped_turns,

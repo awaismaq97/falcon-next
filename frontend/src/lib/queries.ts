@@ -2,6 +2,7 @@
 
 import { useQuery, useQueryClient, useInfiniteQuery } from "@tanstack/react-query";
 import { api } from "./api";
+import { fetchPolyFeed } from "./polymarket";
 import type { MemoryType, Message } from "./types";
 
 type HistoryData = { identity_id: string; messages: Message[]; count: number };
@@ -13,6 +14,7 @@ export const qk = {
   tokens: (id: string) => ["tokens", id] as const,
   memory: (id: string, type?: MemoryType) => ["memory", id, type ?? "all"] as const,
   persona: (id: string) => ["persona", id] as const,
+  personas: (id: string) => ["personas", id] as const,
   traceIndex: (id: string) => ["trace-index", id] as const,
   latestContext: (id: string) => ["latest-context", id] as const,
   traces: (id: string) => ["traces", id] as const,
@@ -22,6 +24,7 @@ export const qk = {
   testingHistory: (slug: string) => ["testing-history", slug] as const,
   testingReport: (slug: string) => ["testing-report", slug] as const,
   voiceConfig: ["voice-config"] as const,
+  polymarket: (limit: number) => ["polymarket", limit] as const,
 };
 
 export const useConfig = () => useQuery({ queryKey: qk.config, queryFn: api.getConfig, staleTime: Infinity });
@@ -45,6 +48,9 @@ export const useMemory = (id: string, type?: MemoryType) =>
 
 export const usePersona = (id: string) =>
   useQuery({ queryKey: qk.persona(id), queryFn: () => api.getPersona(id), enabled: !!id });
+
+export const usePersonas = (id: string) =>
+  useQuery({ queryKey: qk.personas(id), queryFn: () => api.listPersonas(id), enabled: !!id });
 
 export const useTraceIndex = (id: string) =>
   useQuery({ queryKey: qk.traceIndex(id), queryFn: () => api.traceIndex(id), enabled: !!id });
@@ -89,6 +95,19 @@ export const useTestingHistory = (slug: string) =>
 
 export const useTestingReport = (slug: string) =>
   useQuery({ queryKey: qk.testingReport(slug), queryFn: () => api.testingReport(slug), enabled: !!slug });
+
+// Polymarket public feed. Mirrors the server proxy's 5-min cache and auto-
+// refreshes on the same cadence while the tab is mounted; one retry smooths a
+// transient blip. Gated by `enabled` so nothing is fetched until the user opts in.
+export const usePolyMarkets = (enabled = true, limit = 100) =>
+  useQuery({
+    queryKey: qk.polymarket(limit),
+    queryFn: () => fetchPolyFeed({ limit }),
+    enabled,
+    staleTime: 5 * 60 * 1000,
+    refetchInterval: enabled ? 5 * 60 * 1000 : false,
+    retry: 1,
+  });
 
 /** Convenience: invalidate everything scoped to one identity after a turn/edit.
  *  Pass `{ includeHistory: false }` when the history cache was already updated

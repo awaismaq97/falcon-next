@@ -28,7 +28,7 @@ const DEFAULT_SETTINGS: ChatSettings = {
   model: "",
   use_system_prompt: false,
   system_prompt_text: "",
-  use_persona: false,
+  use_persona: true,
   history_max_turns: 15,
   history_mode: "raw" as HistoryMode,
   use_tools: true,

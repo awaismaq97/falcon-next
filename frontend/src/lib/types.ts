@@ -142,6 +142,23 @@ export interface PersonaFields {
   core_traits: string;
 }
 
+export interface PersonaSummary {
+  _id: string;
+  fields: PersonaFields;
+  raw: string;
+  pinned: boolean;
+  /** True if this persona will actually be composed into the payload. */
+  active: boolean;
+  created_at: string;
+}
+
+export interface PersonasResponse {
+  identity_id: string;
+  personas: PersonaSummary[];
+  count: number;
+  default_fields: PersonaFields;
+}
+
 export interface MemoryEntry {
   _id: string;
   identity_id: string;
@@ -168,6 +185,7 @@ export interface ContextSnapshot {
   system_prompt: string | null;
   prompt_state: string;
   persona_block: { content: string; source: string } | null;
+  persona_blocks?: { content: string; source: string }[];
   memory_entries: { content: string; source: string }[];
   history_included: { role: string; content: string; source: string }[];
   history_dropped_turns: number;
