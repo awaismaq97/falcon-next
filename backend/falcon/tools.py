@@ -347,19 +347,25 @@ def _build_llm(model_name, api_key, temperature, top_p):
 # earlier image description with the new request and skips the tool call.
 # Verified 8/8 tool calls with this text vs ~0-2/3 without it.
 _TOOL_USE_DIRECTIVE = (
-    "You have live-data tools. You MUST obey these rules:\n"
-    "1. For any request about current/real-time data (weather, temperature, "
-    "prices, time, live status), you MUST call the matching tool THIS turn to "
-    "get fresh values.\n"
-    "2. Do NOT reuse or repeat weather/live values from earlier messages in the "
-    "conversation, even if an earlier assistant reply already stated them — they "
-    "are stale. Call the tool again.\n"
-    "3. Do not answer a live-data question from a prior image description or from "
-    "memory. Ignore earlier images unless the current request is about them.\n"
-    "4. Short or elliptical follow-ups still count. If the user writes something "
-    "like 'and in Lahore', 'what about Paris?', or 'and now?', treat it as a NEW "
-    "live-data request for that place/topic and call the tool again — never infer "
-    "the answer by adapting the numbers from a previous reply."
+    "You have two live-data tools: get_weather and get_nasa_apod. Decide whether "
+    "to use a tool based ONLY on the user's CURRENT message. Obey these rules:\n"
+    "1. Call a tool ONLY when the current message itself asks for that live data: "
+    "get_weather for weather/temperature/wind/humidity/conditions of a place; "
+    "get_nasa_apod for NASA's astronomy picture of the day. If the current "
+    "message does not ask for either, DO NOT call any tool.\n"
+    "2. Greetings, small talk, thanks, or acknowledgements (e.g. 'hi', 'hello', "
+    "'how are you', 'thanks', 'ok') are NOT live-data requests — reply normally "
+    "with no tool call.\n"
+    "3. The conversation summary and earlier messages must NEVER, on their own, "
+    "trigger a tool call. Past weather or space topics in the history/summary are "
+    "context only; a tool call happens only when THIS message requests fresh data.\n"
+    "4. When the current message IS a live-data request, you MUST call the tool to "
+    "get fresh values — never reuse or adapt weather/live numbers from earlier "
+    "messages or from a prior image description, even if an earlier reply already "
+    "stated them; they are stale.\n"
+    "5. Short or elliptical follow-ups that clearly ask for live data still count "
+    "('and in Lahore', 'what about Paris?', 'and now?') — call the tool for the "
+    "new place/topic. A follow-up that is not about live data does not."
 )
 
 

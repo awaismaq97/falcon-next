@@ -22,7 +22,11 @@ from fastapi import APIRouter, HTTPException, Query
 import falcon.config as Config
 import falcon.identity as Identity
 import falcon.memory as Memory
-from app.schemas import IdentityCreateRequest, MessagesSaveRequest
+from app.schemas import (
+    IdentityCreateRequest,
+    MessagesSaveRequest,
+    SystemPromptSaveRequest,
+)
 from falcon.db import get_db, transaction
 
 router = APIRouter(tags=["identities"])
@@ -118,6 +122,41 @@ def clear_conversation(identity_id: str) -> dict:
         )
         db["conversation_summaries"].delete_one({"identity_id": identity_id}, session=s)
     return {"cleared": identity_id}
+
+
+@router.get("/identities/{identity_id}/system-prompt")
+def get_system_prompt(identity_id: str) -> dict:
+    """Return this identity's saved system prompt, or the config default.
+
+    `exists` is False when nothing has been saved yet for this identity — the
+    frontend then shows the global default until the user edits it.
+    """
+    Identity._validate_identity_id(identity_id)
+    stored = Identity.get_system_prompt(identity_id)
+    if stored is not None:
+        return {
+            "exists": True,
+            "system_prompt": stored["system_prompt"],
+            "use_system_prompt": stored["use_system_prompt"],
+        }
+    return {
+        "exists": False,
+        "system_prompt": Config.default_system_prompt,
+        "use_system_prompt": False,
+    }
+
+
+@router.put("/identities/{identity_id}/system-prompt")
+def save_system_prompt(identity_id: str, req: SystemPromptSaveRequest) -> dict:
+    """Persist this identity's system prompt + toggle to the database."""
+    Identity._validate_identity_id(identity_id)
+    Identity.set_system_prompt(identity_id, req.system_prompt, req.use_system_prompt)
+    return {
+        "identity_id": identity_id,
+        "exists": True,
+        "system_prompt": req.system_prompt,
+        "use_system_prompt": req.use_system_prompt,
+    }
 
 
 @router.get("/identities/{identity_id}/tokens")

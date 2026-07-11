@@ -94,6 +94,62 @@ def create_identity(identity_id: str) -> None:
     )
 
 
+def get_system_prompt(identity_id: str) -> dict | None:
+    """Return the per-identity system prompt override, or None if unset.
+
+    Stored on the identity's own document in the 'identities' collection:
+      {system_prompt: str, use_system_prompt: bool}
+
+    Returns None when the identity has never had a system prompt saved, so the
+    caller can fall back to the global config default. Returns a dict with both
+    fields once one has been persisted (even an empty string counts as "set").
+
+    Raises:
+        ValueError: If identity_id contains forbidden characters.
+    """
+    _validate_identity_id(identity_id)
+    db  = get_db()
+    doc = db["identities"].find_one(
+        {"identity_id": identity_id},
+        {"_id": 0, "system_prompt": 1, "use_system_prompt": 1},
+    )
+    if not doc or "system_prompt" not in doc:
+        return None
+    return {
+        "system_prompt": doc.get("system_prompt", ""),
+        "use_system_prompt": bool(doc.get("use_system_prompt", False)),
+    }
+
+
+def set_system_prompt(
+    identity_id: str, system_prompt: str, use_system_prompt: bool
+) -> None:
+    """Persist the per-identity system prompt override.
+
+    Upserts the identity document so the prompt is saved even for an identity
+    that had no document yet (e.g. the always-present "default"). Existing
+    conversation data on the document is untouched.
+
+    Raises:
+        ValueError: If identity_id contains forbidden characters.
+    """
+    _validate_identity_id(identity_id)
+    db  = get_db()
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    db["identities"].update_one(
+        {"identity_id": identity_id},
+        {
+            "$set": {
+                "system_prompt": system_prompt,
+                "use_system_prompt": bool(use_system_prompt),
+                "system_prompt_updated_at": now,
+            },
+            "$setOnInsert": {"identity_id": identity_id, "created_at": now},
+        },
+        upsert=True,
+    )
+
+
 def load_history(identity_id: str, limit: int = 2000) -> list[dict]:
     """Return the message history for identity_id in chronological order.
 

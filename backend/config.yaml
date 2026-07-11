@@ -165,7 +165,7 @@ vision_model: "meta-llama/llama-4-scout"
 #   valid range [100, 200000]
 # ──────────────────────────────────────────────────────────────────
 history_truncation_strategy: "last-n-turns"
-history_max_turns: 20
+history_max_turns: 15
 history_token_budget: 10000
 
 # ──────────────────────────────────────────────────────────────────

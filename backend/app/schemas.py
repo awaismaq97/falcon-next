@@ -125,6 +125,12 @@ class PersonaSaveRequest(BaseModel):
     pinned: bool = False
 
 
+class SystemPromptSaveRequest(BaseModel):
+    """Per-identity system prompt override saved from the sidebar."""
+    system_prompt: str = ""
+    use_system_prompt: bool = False
+
+
 class RetrievalTestRequest(BaseModel):
     query: str = ""
     use_persona: bool = True

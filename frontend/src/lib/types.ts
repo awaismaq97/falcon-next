@@ -33,6 +33,12 @@ export interface ChatSettings {
   generation: GenerationSettings;
 }
 
+export interface SystemPromptData {
+  exists: boolean;
+  system_prompt: string;
+  use_system_prompt: boolean;
+}
+
 export interface AppConfig {
   default_model: string;
   available_models: string[];

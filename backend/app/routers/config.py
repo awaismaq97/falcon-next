@@ -56,7 +56,7 @@ def get_config() -> dict:
         "history": {
             "max_turns": Config.history_max_turns,
             "modes": HISTORY_MODES,
-            "default_mode": "raw",
+            "default_mode": "hybrid",
         },
         "features": {
             "memory_extraction_enabled": Config.memory_extraction_enabled,

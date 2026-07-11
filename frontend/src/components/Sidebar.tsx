@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Plus, Trash2, Eraser, Moon, Sun, Volume2, Square } from "lucide-react";
 import { api } from "@/lib/api";
-import { useConfig, useIdentities, useTokens, useIdentityInvalidator, useVoiceConfig, qk } from "@/lib/queries";
+import { useConfig, useIdentities, useTokens, useSystemPrompt, useIdentityInvalidator, useVoiceConfig, qk } from "@/lib/queries";
 import { useSettings } from "@/lib/store";
 import { useTts } from "@/lib/tts";
 import { useQueryClient } from "@tanstack/react-query";
@@ -68,6 +68,7 @@ export function Sidebar({ dark, onToggleDark }: { dark: boolean; onToggleDark: (
   const { identityId, setIdentity, settings, update, updateGeneration, payloadReview, setPayloadReview, voice, updateVoice } =
     useSettings();
   const { data: tokens } = useTokens(identityId);
+  const { data: sysPrompt } = useSystemPrompt(identityId);
   const { data: voiceCfg, isLoading: voiceLoading, isError: voiceError, error: voiceErr } = useVoiceConfig();
   const invalidate = useIdentityInvalidator();
   const qc = useQueryClient();
@@ -118,6 +119,46 @@ export function Sidebar({ dark, onToggleDark }: { dark: boolean; onToggleDark: (
   useEffect(() => {
     if (settings.use_system_prompt) autosizeSysPrompt();
   }, [settings.use_system_prompt, settings.system_prompt_text]);
+
+  // ── Per-identity system prompt persistence ───────────────────────────────
+  // The prompt lives in the DB, scoped to the identity. On identity switch we
+  // hydrate the settings store from the fetched value (once per identity, so we
+  // never clobber the user's in-progress typing); on edit we save it back,
+  // debounced. This is what makes the prompt survive reloads and differ per
+  // identity, rather than being a single browser-local value.
+  const hydratedFor = useRef<string | null>(null);
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (!sysPrompt) return;
+    if (hydratedFor.current === identityId) return;
+    hydratedFor.current = identityId;
+    update({
+      system_prompt_text: sysPrompt.system_prompt,
+      use_system_prompt: sysPrompt.use_system_prompt,
+    });
+  }, [sysPrompt, identityId, update]);
+
+  function saveSystemPrompt(system_prompt: string, use_system_prompt: boolean) {
+    const id = identityId;
+    api
+      .saveSystemPrompt(id, { system_prompt, use_system_prompt })
+      .then((data) => qc.setQueryData(qk.systemPrompt(id), data))
+      .catch((e) => toast.error((e as Error).message));
+  }
+
+  function onSysPromptTextChange(text: string) {
+    update({ system_prompt_text: text });
+    autosizeSysPrompt();
+    const enabled = settings.use_system_prompt;
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => saveSystemPrompt(text, enabled), 600);
+  }
+
+  function onSysPromptToggle(v: boolean) {
+    update({ use_system_prompt: v });
+    saveSystemPrompt(settings.system_prompt_text, v);
+  }
 
   async function createIdentity() {
     const name = newName.trim();
@@ -265,7 +306,7 @@ export function Sidebar({ dark, onToggleDark }: { dark: boolean; onToggleDark: (
       <Toggle
         label="System prompt"
         checked={settings.use_system_prompt}
-        onCheckedChange={(v) => update({ use_system_prompt: v })}
+        onCheckedChange={onSysPromptToggle}
         hint={settings.use_system_prompt ? "ON — prompt active" : "OFF — no platform prompt injected"}
       />
       {settings.use_system_prompt && (
@@ -274,10 +315,7 @@ export function Sidebar({ dark, onToggleDark }: { dark: boolean; onToggleDark: (
           className="mt-2 min-h-[6rem] shrink-0 resize-none text-[0.8rem] leading-relaxed"
           rows={5}
           value={settings.system_prompt_text}
-          onChange={(e) => {
-            update({ system_prompt_text: e.target.value });
-            autosizeSysPrompt();
-          }}
+          onChange={(e) => onSysPromptTextChange(e.target.value)}
           placeholder="Enter system prompt…"
         />
       )}

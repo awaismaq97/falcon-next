@@ -21,6 +21,7 @@ import type {
   TestDef,
   TestRun,
   TokenTotals,
+  SystemPromptData,
   Trace,
   TtsParams,
   VoiceConfig,
@@ -125,6 +126,16 @@ export const api = {
   clearConversation: (id: string) =>
     req<{ cleared: string }>(`/api/identities/${encodeURIComponent(id)}/clear`, { method: "POST" }),
   getTokens: (id: string) => req<TokenTotals>(`/api/identities/${encodeURIComponent(id)}/tokens`),
+  // Per-identity system prompt override, persisted server-side (see queries.ts
+  // useSystemPrompt). The sidebar hydrates from this on identity switch and
+  // saves back here on edit, so a prompt survives reloads and follows the identity.
+  getSystemPrompt: (id: string) =>
+    req<SystemPromptData>(`/api/identities/${encodeURIComponent(id)}/system-prompt`),
+  saveSystemPrompt: (id: string, body: { system_prompt: string; use_system_prompt: boolean }) =>
+    req<SystemPromptData & { identity_id: string }>(
+      `/api/identities/${encodeURIComponent(id)}/system-prompt`,
+      { method: "PUT", body: JSON.stringify(body) },
+    ),
   saveMessages: (id: string, entries: Message[]) =>
     req<{ identity_id: string; count: number }>(
       `/api/identities/${encodeURIComponent(id)}/messages`,

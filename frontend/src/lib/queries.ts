@@ -12,6 +12,7 @@ export const qk = {
   identities: ["identities"] as const,
   history: (id: string) => ["history", id] as const,
   tokens: (id: string) => ["tokens", id] as const,
+  systemPrompt: (id: string) => ["system-prompt", id] as const,
   memory: (id: string, type?: MemoryType) => ["memory", id, type ?? "all"] as const,
   persona: (id: string) => ["persona", id] as const,
   personas: (id: string) => ["personas", id] as const,
@@ -42,6 +43,11 @@ export const useHistory = (id: string) =>
 
 export const useTokens = (id: string) =>
   useQuery({ queryKey: qk.tokens(id), queryFn: () => api.getTokens(id), enabled: !!id });
+
+// Per-identity system prompt. staleTime 0 (default) so switching identity
+// refetches; the sidebar hydrates the settings store from this.
+export const useSystemPrompt = (id: string) =>
+  useQuery({ queryKey: qk.systemPrompt(id), queryFn: () => api.getSystemPrompt(id), enabled: !!id });
 
 export const useMemory = (id: string, type?: MemoryType) =>
   useQuery({ queryKey: qk.memory(id, type), queryFn: () => api.listMemory(id, type), enabled: !!id });
