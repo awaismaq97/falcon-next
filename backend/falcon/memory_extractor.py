@@ -226,10 +226,25 @@ def _extract_and_persist(
 
     # ── LLM call ─────────────────────────────────────────────────────────
     try:
-        from falcon.engine import get_client
-        client = get_client(Config.OPENROUTER_API_KEY, title="Falcon-MemoryExtractor")
+        from falcon.engine import get_client, get_openai_client
+
+        # Prefer OpenAI-direct so extraction doesn't consume the OpenRouter rate
+        # budget; fall back to OpenRouter when no OpenAI key is configured.
+        if Config.background_use_openai:
+            client = get_openai_client(Config.OPENAI_API_KEY, title="Falcon-MemoryExtractor")
+            call_model = Config.openai_background_model
+            _provider = "OpenAI-direct"
+        else:
+            client = get_client(Config.OPENROUTER_API_KEY, title="Falcon-MemoryExtractor")
+            call_model = Config.extraction_model
+            _provider = "OpenRouter"
+        logger.info(
+            "memory_extractor: calling %s model %r for identity=%r turn=%s",
+            _provider, call_model, identity_id, turn_index,
+        )
+
         response = client.chat.completions.create(
-            model=Config.extraction_model,
+            model=call_model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.1,
             max_tokens=1024,

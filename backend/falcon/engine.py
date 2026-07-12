@@ -77,6 +77,30 @@ def get_client(api_key: str, title: str = "Falcon") -> OpenAI:
     """
     return _get_client(api_key, title)
 
+
+_OPENAI_BASE_URL = "https://api.openai.com/v1"
+
+
+def get_openai_client(api_key: str, title: str = "Falcon") -> OpenAI:
+    """Pooled client that talks to the OpenAI API DIRECTLY (not via OpenRouter).
+
+    Used by background tasks (summarization, memory extraction) so they can run
+    on an OpenAI key and NOT consume the OpenRouter rate budget — which matters
+    when the main chat model is being rate-limited on OpenRouter. Model ids here
+    are native OpenAI ids (e.g. "gpt-4o-mini"), with no "openai/" prefix.
+
+    Cached separately from the OpenRouter clients (distinct cache-key namespace)
+    so the two never collide.
+    """
+    cache_key = f"openai-direct:{title}:{api_key}"
+    if cache_key not in _client_cache:
+        _client_cache[cache_key] = OpenAI(
+            api_key=api_key,
+            base_url=_OPENAI_BASE_URL,
+            max_retries=5,
+        )
+    return _client_cache[cache_key]
+
 VALID_SOURCES = frozenset({
     "system-prompt",
     "persona",

@@ -171,19 +171,22 @@ recency_weight: 0.4
 relevance_weight: 0.6
 
 # ──────────────────────────────────────────────────────────────────
-# Memory Extraction
-# extraction_model: model used by the background memory extractor.
-# Use a fast/cheap model — extraction is simple JSON classification.
-# Defaults to default_model if not set.
+# Background tasks (memory extraction + conversation summarization)
+#
+# When OPENAI_API_KEY is set in the environment, BOTH of these run directly
+# against the OpenAI API using `openai_background_model` below — bypassing
+# OpenRouter so they don't consume its rate budget (which the main chat model
+# needs). extraction_model / summary_model are only used as the OpenRouter
+# FALLBACK when no OpenAI key is present, so keep them as OpenRouter ids.
 # ──────────────────────────────────────────────────────────────────
-extraction_model: "openai/gpt-4o-mini"
 
-# ──────────────────────────────────────────────────────────────────
-# Conversation Summarization
-# summary_model: model used to generate conversation summaries.
-# Use a fast/cheap model. Falls back to default_model if not set.
-# ──────────────────────────────────────────────────────────────────
-summary_model: "deepseek/deepseek-v4-flash"
+# Native OpenAI model id (no "openai/" prefix) used for both background tasks
+# when calling OpenAI directly.
+openai_background_model: "gpt-4o-mini"
+
+# OpenRouter fallbacks (used only when OPENAI_API_KEY is absent):
+extraction_model: "openai/gpt-4o-mini"
+summary_model: "openai/gpt-4o-mini"
 
 # vision_model: used automatically for any turn that includes an uploaded
 # image (overrides the selected chat model just for that call). Must be

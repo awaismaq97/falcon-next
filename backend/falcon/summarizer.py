@@ -111,10 +111,27 @@ def update_summary(
     turn_count = sum(1 for e in history if e.get("role") == "user")
 
     try:
-        from falcon.engine import get_client
-        client = get_client(api_key, title="Falcon-Summarizer")
+        import falcon.config as Config
+        from falcon.engine import get_client, get_openai_client
+
+        # Prefer OpenAI-direct so summarization doesn't consume the OpenRouter
+        # rate budget; fall back to OpenRouter (the passed model/api_key) when no
+        # OpenAI key is configured.
+        if Config.background_use_openai:
+            client = get_openai_client(Config.OPENAI_API_KEY, title="Falcon-Summarizer")
+            call_model = Config.openai_background_model
+            _provider = "OpenAI-direct"
+        else:
+            client = get_client(api_key, title="Falcon-Summarizer")
+            call_model = model
+            _provider = "OpenRouter"
+        logger.info(
+            "summarizer: calling %s model %r for identity=%r",
+            _provider, call_model, identity_id,
+        )
+
         response = client.chat.completions.create(
-            model=model,
+            model=call_model,
             messages=[
                 {"role": "system", "content": _SUMMARY_SYSTEM_PROMPT},
                 {

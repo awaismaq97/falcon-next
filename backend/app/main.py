@@ -88,9 +88,19 @@ def create_app() -> FastAPI:
     @app.get("/debug-env", tags=["meta"])
     async def debug_env():
         import os
+        import falcon.config as Config
+
+        def _mask(v: str) -> str:
+            return f"set (…{v[-4:]})" if v and v.strip() else "NOT SET"
+
         return {
-            "OPENROUTER_API_KEY": os.environ.get("OPENROUTER_API_KEY", "NOT SET"),
-            "MONGODB_URI": os.environ.get("MONGODB_URI", "NOT SET"),
+            "OPENROUTER_API_KEY": _mask(os.environ.get("OPENROUTER_API_KEY", "")),
+            "OPENAI_API_KEY": _mask(os.environ.get("OPENAI_API_KEY", "")),
+            "MONGODB_URI": _mask(os.environ.get("MONGODB_URI", "")),
+            # Resolved background-task routing — this is what actually decides
+            # whether summary + memory extraction hit OpenAI or OpenRouter.
+            "background_use_openai": Config.background_use_openai,
+            "openai_background_model": Config.openai_background_model,
             "all_keys": [k for k in os.environ.keys()],
         }
 
