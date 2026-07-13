@@ -16,6 +16,7 @@ import { LogsTab } from "@/components/tabs/LogsTab";
 import { TestingTab } from "@/components/tabs/TestingTab";
 import { DualRunTab } from "@/components/tabs/DualRunTab";
 import { PolyMarketTab } from "@/components/tabs/PolyMarketTab";
+import { KalshiTab } from "@/components/tabs/KalshiTab";
 
 const TABS = [
   { id: "chat", label: "Chat" },
@@ -26,6 +27,7 @@ const TABS = [
   { id: "testing", label: "Testing" },
   { id: "dualrun", label: "Dual Run" },
   { id: "polymarket", label: "Poly Market" },
+  { id: "kalshi", label: "Kalshi" },
 ];
 
 export default function Home() {
@@ -137,6 +139,9 @@ export default function Home() {
             </Tabs.Content>
             <Tabs.Content value="polymarket" className="h-full data-[state=inactive]:hidden">
               <PolyMarketTab />
+            </Tabs.Content>
+            <Tabs.Content value="kalshi" className="h-full data-[state=inactive]:hidden">
+              <KalshiTab />
             </Tabs.Content>
           </div>
         </Tabs.Root>

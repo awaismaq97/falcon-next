@@ -3,6 +3,7 @@
 import { useQuery, useQueryClient, useInfiniteQuery } from "@tanstack/react-query";
 import { api } from "./api";
 import { fetchPolyFeed } from "./polymarket";
+import { fetchKalshiFeed } from "./kalshi";
 import type { MemoryType, Message } from "./types";
 
 type HistoryData = { identity_id: string; messages: Message[]; count: number };
@@ -26,6 +27,7 @@ export const qk = {
   testingReport: (slug: string) => ["testing-report", slug] as const,
   voiceConfig: ["voice-config"] as const,
   polymarket: (limit: number) => ["polymarket", limit] as const,
+  kalshi: (limit: number) => ["kalshi", limit] as const,
 };
 
 export const useConfig = () => useQuery({ queryKey: qk.config, queryFn: api.getConfig, staleTime: Infinity });
@@ -109,6 +111,19 @@ export const usePolyMarkets = (enabled = true, limit = 100) =>
   useQuery({
     queryKey: qk.polymarket(limit),
     queryFn: () => fetchPolyFeed({ limit }),
+    enabled,
+    staleTime: 5 * 60 * 1000,
+    refetchInterval: enabled ? 5 * 60 * 1000 : false,
+    retry: 1,
+  });
+
+// Kalshi public feed. Mirrors the server proxy's 5-min cache and auto-refreshes
+// on the same cadence while the tab is mounted; one retry smooths a transient
+// blip. Gated by `enabled` so nothing is fetched until the user opts in.
+export const useKalshiMarkets = (enabled = true, limit = 200) =>
+  useQuery({
+    queryKey: qk.kalshi(limit),
+    queryFn: () => fetchKalshiFeed({ limit }),
     enabled,
     staleTime: 5 * 60 * 1000,
     refetchInterval: enabled ? 5 * 60 * 1000 : false,
