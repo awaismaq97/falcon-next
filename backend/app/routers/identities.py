@@ -21,6 +21,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 import falcon.config as Config
 import falcon.identity as Identity
+import falcon.logger as Logger
 import falcon.memory as Memory
 from app.schemas import (
     IdentityCreateRequest,
@@ -33,9 +34,17 @@ router = APIRouter(tags=["identities"])
 
 
 def _message_counts() -> dict[str, int]:
-    """Return {identity_id: message_count} in a single aggregation round-trip."""
+    """Return {identity_id: turn_count} in a single aggregation round-trip.
+
+    A turn is a user message plus its assistant response, counted as one. Each
+    turn has exactly one user message, so counting user messages yields the turn
+    count directly.
+    """
     db = get_db()
-    pipeline = [{"$group": {"_id": "$identity_id", "n": {"$sum": 1}}}]
+    pipeline = [
+        {"$match": {"role": "user"}},
+        {"$group": {"_id": "$identity_id", "n": {"$sum": 1}}},
+    ]
     return {doc["_id"]: doc["n"] for doc in db["messages"].aggregate(pipeline)}
 
 
@@ -44,6 +53,12 @@ def list_identities() -> dict:
     ids = Identity.list_identities()
     # Ensure the always-present default identity is included.
     id_set = set(ids) | {"default"}
+    # Apply the retention window to every identity before counting, so the counts
+    # reflect only retained turns — including conversations that predate the
+    # retention policy or haven't been messaged since. Each call is a cheap no-op
+    # once an identity is already within the window.
+    for iid in id_set:
+        Logger.enforce_retention(iid)
     counts = _message_counts()
     items = [
         {"identity_id": iid, "message_count": counts.get(iid, 0)}

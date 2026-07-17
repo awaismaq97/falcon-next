@@ -148,19 +148,42 @@ export function useIdentityInvalidator() {
   };
 }
 
+/** Newest conversation turns retained per identity. Mirrors
+ *  CONVERSATION_RETENTION_TURNS in the backend (falcon/logger.py). A turn is a
+ *  user message plus its assistant response, so the tail is trimmed by user
+ *  message, not by raw message count. */
+export const CONVERSATION_RETENTION_TURNS = 15;
+
+/** Trim `messages` to the newest `turns` turns: keep everything from the
+ *  `turns`-th newest user message onward, mirroring the server's prune cutoff. */
+function tailByTurns(messages: Message[], turns: number): Message[] {
+  let seen = 0;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "user") {
+      seen += 1;
+      if (seen === turns) return messages.slice(i);
+    }
+  }
+  return messages; // fewer than `turns` turns present — keep all
+}
+
 /** Append confirmed messages to the cached history in place — avoids refetching
- *  the entire (up to thousands) message tail after every single turn. Returns
- *  false if history isn't cached yet, so the caller can fall back to a refetch. */
+ *  the entire message tail after every single turn. The cache is trimmed to the
+ *  newest CONVERSATION_RETENTION_TURNS turns so it matches what the server has
+ *  retained. Returns false if history isn't cached yet, so the caller can fall
+ *  back to a refetch. */
 export function useHistoryAppender() {
   const qc = useQueryClient();
   return (id: string, messages: Message[]): boolean => {
     const key = qk.history(id);
     const existing = qc.getQueryData<HistoryData>(key);
     if (!existing) return false;
+    const merged = [...existing.messages, ...messages];
+    const trimmed = tailByTurns(merged, CONVERSATION_RETENTION_TURNS);
     qc.setQueryData<HistoryData>(key, {
       ...existing,
-      messages: [...existing.messages, ...messages],
-      count: existing.count + messages.length,
+      messages: trimmed,
+      count: trimmed.length,
     });
     return true;
   };
