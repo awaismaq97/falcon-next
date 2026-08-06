@@ -112,22 +112,13 @@ def update_summary(
 
     try:
         import falcon.config as Config
-        from falcon.engine import get_client, get_openai_client
+        from falcon.engine import get_client
 
-        # Prefer OpenAI-direct so summarization doesn't consume the OpenRouter
-        # rate budget; fall back to OpenRouter (the passed model/api_key) when no
-        # OpenAI key is configured.
-        if Config.background_use_openai:
-            client = get_openai_client(Config.OPENAI_API_KEY, title="Falcon-Summarizer")
-            call_model = Config.openai_background_model
-            _provider = "OpenAI-direct"
-        else:
-            client = get_client(api_key, title="Falcon-Summarizer")
-            call_model = model
-            _provider = "OpenRouter"
+        client = get_client(api_key, title="Falcon-Summarizer")
+        call_model = model
         logger.info(
-            "summarizer: calling %s model %r for identity=%r",
-            _provider, call_model, identity_id,
+            "summarizer: calling OpenRouter model %r for identity=%r",
+            call_model, identity_id,
         )
 
         response = client.chat.completions.create(

@@ -57,17 +57,10 @@ if not _raw_mongo_uri or not _raw_mongo_uri.strip():
 MONGODB_URI: str = _raw_mongo_uri
 
 # ---------------------------------------------------------------------------
-# Read OPENAI_API_KEY (optional) — used to run background tasks (conversation
-# summarization + memory extraction) directly against the OpenAI API instead of
-# through OpenRouter, so those calls don't consume the OpenRouter rate budget
-# that the main chat model needs. If unset, those tasks fall back to OpenRouter.
+# OPENAI_API_KEY — kept for env-var compatibility but background tasks always
+# use OpenRouter regardless of whether this is set.
 # ---------------------------------------------------------------------------
 OPENAI_API_KEY: str = os.environ.get("OPENAI_API_KEY", "")
-if not OPENAI_API_KEY or not OPENAI_API_KEY.strip():
-    _logger.warning(
-        "OPENAI_API_KEY is not set — summary/memory extraction will run through "
-        "OpenRouter. Set OPENAI_API_KEY to offload them to the OpenAI API directly."
-    )
 
 # ---------------------------------------------------------------------------
 # Load and validate config.yaml
@@ -204,27 +197,15 @@ summary_model: str = str(_cfg.get("summary_model") or _default_model)
 
 # ---------------------------------------------------------------------------
 # Background-task routing (summary + memory extraction).
-# When OPENAI_API_KEY is present, these two background tasks call the OpenAI API
-# directly using `openai_background_model` (a native OpenAI id, no "openai/"
-# prefix), keeping them off the OpenRouter rate budget. When the key is absent
-# they fall back to OpenRouter using summary_model / extraction_model.
+# Always use OpenRouter — background_use_openai is permanently False.
 # ---------------------------------------------------------------------------
-background_use_openai: bool = bool(OPENAI_API_KEY and OPENAI_API_KEY.strip())
+background_use_openai: bool = False
 openai_background_model: str = str(_cfg.get("openai_background_model") or "gpt-4o-mini")
 
-# Decisive startup signal so it's obvious in the logs which provider the two
-# background tasks (summary + memory extraction) will actually call.
-if background_use_openai:
-    _logger.info(
-        "Background tasks → OpenAI-direct, model %r (OPENAI_API_KEY detected).",
-        openai_background_model,
-    )
-else:
-    _logger.info(
-        "Background tasks → OpenRouter fallback (no OPENAI_API_KEY set): "
-        "summary=%r extraction=%r",
-        summary_model, extraction_model,
-    )
+_logger.info(
+    "Background tasks → OpenRouter: summary=%r extraction=%r",
+    summary_model, extraction_model,
+)
 
 # Vision model — used automatically for any turn that includes an uploaded
 # image, overriding the selected chat model just for that call. Must be a

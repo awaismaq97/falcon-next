@@ -4,7 +4,7 @@ import { useQuery, useQueryClient, useInfiniteQuery } from "@tanstack/react-quer
 import { api } from "./api";
 import { fetchPolyFeed } from "./polymarket";
 import { fetchKalshiFeed } from "./kalshi";
-import type { MemoryType, Message } from "./types";
+import type { Category, MemoryType, Message } from "./types";
 
 type HistoryData = { identity_id: string; messages: Message[]; count: number };
 
@@ -28,6 +28,8 @@ export const qk = {
   voiceConfig: ["voice-config"] as const,
   polymarket: (limit: number) => ["polymarket", limit] as const,
   kalshi: (limit: number) => ["kalshi", limit] as const,
+  categories: (id: string) => ["categories", id] as const,
+  categoryMessages: (id: string, categoryId: string) => ["category-messages", id, categoryId] as const,
 };
 
 export const useConfig = () => useQuery({ queryKey: qk.config, queryFn: api.getConfig, staleTime: Infinity });
@@ -128,6 +130,22 @@ export const useKalshiMarkets = (enabled = true, limit = 200) =>
     staleTime: 5 * 60 * 1000,
     refetchInterval: enabled ? 5 * 60 * 1000 : false,
     retry: 1,
+  });
+
+export const useCategories = (id: string) =>
+  useQuery({
+    queryKey: qk.categories(id),
+    queryFn: () => api.listCategories(id),
+    enabled: !!id,
+    staleTime: 30 * 1000,
+  });
+
+export const useCategoryMessages = (id: string, categoryId: string, skip = 0, limit = 20) =>
+  useQuery({
+    queryKey: [...qk.categoryMessages(id, categoryId), skip, limit],
+    queryFn: () => api.listCategoryMessages(id, categoryId, skip, limit),
+    enabled: !!id && !!categoryId,
+    staleTime: 10 * 1000,
   });
 
 /** Convenience: invalidate everything scoped to one identity after a turn/edit.

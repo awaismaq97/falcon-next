@@ -189,6 +189,13 @@ def _ensure_indexes_async(db: Database) -> None:
             db["dual_run_log"].create_index([("identity_id", 1), ("state_tag", 1)])
             # Identity registry index
             db["identities"].create_index("identity_id", unique=True)
+            # Categories indexes
+            db["categories"].create_index("identity_id")
+            db["categories"].create_index([("identity_id", 1), ("name", 1)], unique=True)
+            db["category_messages"].create_index("identity_id")
+            db["category_messages"].create_index("category_id")
+            db["category_messages"].create_index([("identity_id", 1), ("category_id", 1)])
+            db["category_messages"].create_index([("identity_id", 1), ("category_id", 1), ("recorded_at", -1)])
         except Exception as exc:
             logger.warning("index creation failed (queries still work): %s", exc)
 

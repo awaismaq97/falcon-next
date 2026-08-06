@@ -258,6 +258,39 @@ export interface TokenTotals {
   total: number;
 }
 
+// ---------------------------------------------------------------------------
+// Categories
+// ---------------------------------------------------------------------------
+
+export interface Category {
+  _id: string;
+  identity_id: string;
+  name: string;
+  created_at: string;
+  message_count: number;
+}
+
+export interface CategoryMessage {
+  _id: string;
+  identity_id: string;
+  category_id: string;
+  category_name: string;
+  user_message: string;
+  assistant_response: string;
+  user_ts: string;
+  asst_ts: string;
+  recorded_at: string;
+  /** Present when the LLM hallucinated a category name and the message was stored in "Other" as a fallback. */
+  hallucinated_category?: string;
+}
+
+export interface CategoryMessagesPage {
+  messages: CategoryMessage[];
+  total: number;
+  skip: number;
+  limit: number;
+}
+
 // Dual-run
 export interface DualRunSide {
   text: string;

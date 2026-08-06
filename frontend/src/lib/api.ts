@@ -7,6 +7,9 @@
 import type {
   AppConfig,
   AuditSummary,
+  Category,
+  CategoryMessage,
+  CategoryMessagesPage,
   ChatSettings,
   ContextSnapshot,
   DualRunRecord,
@@ -290,4 +293,32 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ test_id: slug, variant: String(variant) }),
     }),
+
+  // ── Categories ─────────────────────────────────────────────────────────────
+  listCategories: (id: string) =>
+    req<{ identity_id: string; categories: Category[]; count: number }>(
+      `/api/identities/${encodeURIComponent(id)}/categories`,
+    ),
+  addCategory: (id: string, name: string) =>
+    req<Category>(`/api/identities/${encodeURIComponent(id)}/categories`, {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    }),
+  deleteCategory: (id: string, categoryId: string) =>
+    req<{ deleted: string }>(
+      `/api/identities/${encodeURIComponent(id)}/categories/${encodeURIComponent(categoryId)}`,
+      { method: "DELETE" },
+    ),
+  listCategoryMessages: (id: string, categoryId: string, skip = 0, limit = 20) =>
+    req<CategoryMessagesPage>(
+      `/api/identities/${encodeURIComponent(id)}/categories/${encodeURIComponent(categoryId)}/messages?skip=${skip}&limit=${limit}`,
+    ),
+  deleteCategoryMessage: (id: string, categoryId: string, messageId: string) =>
+    req<{ deleted: string }>(
+      `/api/identities/${encodeURIComponent(id)}/categories/${encodeURIComponent(categoryId)}/messages/${encodeURIComponent(messageId)}`,
+      { method: "DELETE" },
+    ),
+
+  exportCategoryPdf: (id: string, categoryId: string): string =>
+    `${API_BASE}/api/identities/${encodeURIComponent(id)}/categories/${encodeURIComponent(categoryId)}/export.pdf`,
 };

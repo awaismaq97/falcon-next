@@ -9,6 +9,7 @@ import { cn } from "@/lib/utils";
 import { Sidebar } from "@/components/Sidebar";
 import { Button, Spinner } from "@/components/ui/primitives";
 import { ChatTab } from "@/components/tabs/ChatTab";
+import { CategoriesTab } from "@/components/tabs/CategoriesTab";
 import { ContextTab } from "@/components/tabs/ContextTab";
 import { MemoryTab } from "@/components/tabs/MemoryTab";
 import { AuditTab } from "@/components/tabs/AuditTab";
@@ -22,6 +23,7 @@ const TABS = [
   { id: "chat", label: "Chat" },
   { id: "context", label: "Context" },
   { id: "memory", label: "Memory" },
+  { id: "categories", label: "Categories" },
   { id: "audit", label: "Audit" },
   { id: "logs", label: "Logs" },
   { id: "testing", label: "Testing" },
@@ -124,6 +126,9 @@ export default function Home() {
             </Tabs.Content>
             <Tabs.Content value="memory" className="h-full overflow-y-auto data-[state=inactive]:hidden">
               <MemoryTab />
+            </Tabs.Content>
+            <Tabs.Content value="categories" className="h-full overflow-hidden data-[state=inactive]:hidden">
+              <CategoriesTab />
             </Tabs.Content>
             <Tabs.Content value="audit" className="h-full overflow-y-auto data-[state=inactive]:hidden">
               <AuditTab />

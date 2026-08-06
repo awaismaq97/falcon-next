@@ -522,6 +522,8 @@ def run_send_flow(req: ChatSendRequest, emit: Emit) -> None:
         response_text=response_text,
         user_input=user_input,
         final_history=final_history,
+        user_ts=user_ts,
+        asst_ts=asst_ts,
     )
 
 
@@ -573,6 +575,8 @@ def _launch_background_tasks(
     response_text: str,
     user_input: str,
     final_history: list,
+    user_ts: str = "",
+    asst_ts: str = "",
 ) -> None:
     identity_id = req.identity_id
     s = req.settings
@@ -655,6 +659,19 @@ def _launch_background_tasks(
         except Exception as exc:  # noqa: BLE001
             logger.error("bg_dual_run failed for identity=%s: %s", identity_id, exc)
 
+    def _bg_categorizer():
+        try:
+            import falcon.categorizer as Categorizer
+            Categorizer.run({
+                "identity_id":       identity_id,
+                "user_message":      user_input,
+                "assistant_message": response_text,
+                "user_ts":           user_ts,
+                "asst_ts":           asst_ts,
+            })
+        except Exception as exc:  # noqa: BLE001
+            logger.error("bg_categorizer failed for identity=%s: %s", identity_id, exc)
+
     threading.Thread(target=_bg_audit, daemon=True).start()
     threading.Thread(target=_bg_extractor, daemon=True).start()
     # Summary only when the active history mode will consume it (raw never does).
@@ -662,3 +679,4 @@ def _launch_background_tasks(
         threading.Thread(target=_bg_summarizer, daemon=True).start()
     if s.dual_run_enabled:
         threading.Thread(target=_bg_dual_run, daemon=True).start()
+    threading.Thread(target=_bg_categorizer, daemon=True).start()

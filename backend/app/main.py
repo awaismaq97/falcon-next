@@ -107,6 +107,7 @@ def create_app() -> FastAPI:
     # ── Routers ────────────────────────────────────────────────────────────
     from app.routers import (
         audit,
+        categories as categories_router,
         chat,
         config as config_router,
         documents,
@@ -129,6 +130,7 @@ def create_app() -> FastAPI:
     app.include_router(testing.router, prefix=prefix)
     app.include_router(voice.router, prefix=prefix)
     app.include_router(documents.router, prefix=prefix)
+    app.include_router(categories_router.router, prefix=prefix)
 
     return app
 
