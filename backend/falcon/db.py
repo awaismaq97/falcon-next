@@ -196,6 +196,10 @@ def _ensure_indexes_async(db: Database) -> None:
             db["category_messages"].create_index("category_id")
             db["category_messages"].create_index([("identity_id", 1), ("category_id", 1)])
             db["category_messages"].create_index([("identity_id", 1), ("category_id", 1), ("recorded_at", -1)])
+            # Admin system indexes
+            db["admin_users"].create_index("created_at")
+            db["portal_users"].create_index("created_at")
+            db["admin_audit_log"].create_index("timestamp")
         except Exception as exc:
             logger.warning("index creation failed (queries still work): %s", exc)
 

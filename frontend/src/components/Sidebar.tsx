@@ -5,6 +5,7 @@ import { Plus, Trash2, Eraser, Moon, Sun, Volume2, Square } from "lucide-react";
 import { api } from "@/lib/api";
 import { useConfig, useIdentities, useTokens, useSystemPrompt, useIdentityInvalidator, useVoiceConfig, qk } from "@/lib/queries";
 import { useSettings } from "@/lib/store";
+import { useAuth } from "@/lib/authStore";
 import { useTts } from "@/lib/tts";
 import { useQueryClient } from "@tanstack/react-query";
 import type { VoicePrefs } from "@/lib/types";
@@ -67,11 +68,24 @@ export function Sidebar({ dark, onToggleDark }: { dark: boolean; onToggleDark: (
   const { data: identitiesData } = useIdentities();
   const { identityId, setIdentity, settings, update, updateGeneration, payloadReview, setPayloadReview, voice, updateVoice } =
     useSettings();
+  const { user } = useAuth();
   const { data: tokens } = useTokens(identityId);
   const { data: sysPrompt } = useSystemPrompt(identityId);
   const { data: voiceCfg, isLoading: voiceLoading, isError: voiceError, error: voiceErr } = useVoiceConfig();
   const invalidate = useIdentityInvalidator();
   const qc = useQueryClient();
+
+  // Portal users (role !== "admin") are locked to their own identity only.
+  // Admins see the full list from the backend.
+  const isAdmin = user?.role === "admin";
+  const allIdentities = identitiesData?.identities ?? [];
+  const identities = isAdmin
+    ? allIdentities
+    : allIdentities.filter((i) => i.identity_id === user?.identity_id);
+
+  // Voice is only shown when ElevenLabs is configured AND the user has the
+  // voice feature enabled (admins always have full access).
+  const voiceFeatureEnabled = isAdmin || (user?.features?.voice !== false);
 
   // Voice preview button state (reads the shared TTS player).
   const previewPlaying = useTts((s) => s.playingId === PREVIEW_ID);
@@ -102,7 +116,6 @@ export function Sidebar({ dark, onToggleDark }: { dark: boolean; onToggleDark: (
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [busy, setBusy] = useState(false);
 
-  const identities = identitiesData?.identities ?? [];
   const models = config?.available_models ?? [];
   const currentCount = identities.find((i) => i.identity_id === identityId)?.message_count ?? 0;
 
@@ -218,28 +231,44 @@ export function Sidebar({ dark, onToggleDark }: { dark: boolean; onToggleDark: (
 
       {/* Identity */}
       <SectionLabel>Identity</SectionLabel>
-      <Select
-        value={identityId}
-        onValueChange={setIdentity}
-        options={identities.map((i) => ({
-          value: i.identity_id,
-          label: `${i.identity_id} (${i.message_count} msgs)`,
-        }))}
-      />
-      <div className="mt-2 flex gap-1.5">
-        <Input
-          value={newName}
-          onChange={(e) => setNewName(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && createIdentity()}
-          placeholder="New identity name…"
-          className="h-8 text-[0.8rem]"
+      {isAdmin ? (
+        /* Admin: full dropdown to switch between all identities */
+        <Select
+          value={identityId}
+          onValueChange={setIdentity}
+          options={identities.map((i) => ({
+            value: i.identity_id,
+            label: `${i.identity_id} (${i.message_count} msgs)`,
+          }))}
         />
-        <Button size="icon" variant="secondary" onClick={createIdentity} loading={busy} title="Create">
-          <Plus className="h-4 w-4" />
-        </Button>
-      </div>
+      ) : (
+        /* Portal user: locked to their own identity — just show it as a label */
+        <div className="flex h-9 items-center rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 text-sm text-[var(--color-fg)]">
+          {identityId}
+          <span className="ml-auto font-mono text-xs text-[var(--color-fg-subtle)]">
+            {currentCount} msgs
+          </span>
+        </div>
+      )}
 
-      {identityId !== "default" && (
+      {/* Create new identity — admin only */}
+      {isAdmin && (
+        <div className="mt-2 flex gap-1.5">
+          <Input
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && createIdentity()}
+            placeholder="New identity name…"
+            className="h-8 text-[0.8rem]"
+          />
+          <Button size="icon" variant="secondary" onClick={createIdentity} loading={busy} title="Create">
+            <Plus className="h-4 w-4" />
+          </Button>
+        </div>
+      )}
+
+      {/* Delete identity — admin only, and not for "default" */}
+      {isAdmin && identityId !== "default" && (
         <>
           {confirmDelete ? (
             <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-2.5 text-[0.75rem] text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300">
@@ -480,7 +509,9 @@ export function Sidebar({ dark, onToggleDark }: { dark: boolean; onToggleDark: (
         </div>
       )}
 
-      {/* Voice — ElevenLabs text-to-speech */}
+      {/* Voice — ElevenLabs text-to-speech (hidden when voice feature is disabled for this user) */}
+      {voiceFeatureEnabled && (
+      <>
       <SectionLabel>Voice · Text-to-Speech</SectionLabel>
       {voiceLoading ? (
         <div className="flex items-center gap-2 text-[0.75rem] text-[var(--color-fg-subtle)]">
@@ -610,6 +641,9 @@ export function Sidebar({ dark, onToggleDark }: { dark: boolean; onToggleDark: (
             />
           )}
         </>
+      )}
+      {/* End voiceFeatureEnabled */}
+      </>
       )}
 
       {/* Session Stats */}

@@ -46,6 +46,15 @@ async def lifespan(app: FastAPI):
 
         get_db()
         logger.info("MongoDB connection warmed")
+
+        # Seed the default admin account on first boot (no-op if already exists).
+        try:
+            from falcon.admin_users import seed_first_admin
+            seed_first_admin("rgqt11", "rgqt11admin")
+            logger.info("Admin seed check complete")
+        except Exception as seed_exc:
+            logger.warning("Admin seed skipped: %s", seed_exc)
+
     except Exception as exc:  # noqa: BLE001
         logger.warning("MongoDB warmup skipped (will retry lazily): %s", exc)
     yield
@@ -106,6 +115,7 @@ def create_app() -> FastAPI:
 
     # ── Routers ────────────────────────────────────────────────────────────
     from app.routers import (
+        admin,
         audit,
         categories as categories_router,
         chat,
@@ -120,6 +130,7 @@ def create_app() -> FastAPI:
     )
 
     prefix = settings.api_prefix
+    app.include_router(admin.router, prefix=prefix)
     app.include_router(config_router.router, prefix=prefix)
     app.include_router(identities.router, prefix=prefix)
     app.include_router(chat.router, prefix=prefix)

@@ -22,6 +22,7 @@ import {
 import { api } from "@/lib/api";
 import { useCategories, useCategoryMessages, qk } from "@/lib/queries";
 import { useSettings } from "@/lib/store";
+import { useAuth } from "@/lib/authStore";
 import { useTts } from "@/lib/tts";
 import type { Category, CategoryMessage } from "@/lib/types";
 import { Button, Input, Spinner } from "@/components/ui/primitives";
@@ -326,10 +327,12 @@ function CategoryMessagesView({
   const qc = useQueryClient();
   const skip = page * PAGE_SIZE;
 
-  // Mirror the canSpeak check from ChatMessage — only show the voice button
-  // when a voice_id is configured in the sidebar settings.
+  // Only show the voice button when a voice_id is configured AND the user
+  // has the voice feature enabled (admins always have full access).
   const voiceId = useSettings((s) => s.voice.voice_id);
-  const canSpeak = !!voiceId;
+  const { user } = useAuth();
+  const voiceFeatureEnabled = user?.role === "admin" || (user?.features?.voice !== false);
+  const canSpeak = !!voiceId && voiceFeatureEnabled;
 
   const { data, isLoading, isError, error, refetch } = useCategoryMessages(
     identityId,

@@ -2,9 +2,10 @@
 
 import { useEffect, useState } from "react";
 import * as Tabs from "@radix-ui/react-tabs";
-import { Menu } from "lucide-react";
+import { LogOut, Menu, Shield } from "lucide-react";
 import { useConfig } from "@/lib/queries";
 import { useSettings } from "@/lib/store";
+import { useAuth } from "@/lib/authStore";
 import { cn } from "@/lib/utils";
 import { Sidebar } from "@/components/Sidebar";
 import { Button, Spinner } from "@/components/ui/primitives";
@@ -18,28 +19,35 @@ import { TestingTab } from "@/components/tabs/TestingTab";
 import { DualRunTab } from "@/components/tabs/DualRunTab";
 import { PolyMarketTab } from "@/components/tabs/PolyMarketTab";
 import { KalshiTab } from "@/components/tabs/KalshiTab";
+import { AdminPanel } from "@/components/admin/AdminPanel";
 
-const TABS = [
-  { id: "chat", label: "Chat" },
-  { id: "context", label: "Context" },
-  { id: "memory", label: "Memory" },
-  { id: "categories", label: "Categories" },
-  { id: "audit", label: "Audit" },
-  { id: "logs", label: "Logs" },
-  { id: "testing", label: "Testing" },
-  { id: "dualrun", label: "Dual Run" },
-  { id: "polymarket", label: "Poly Market" },
-  { id: "kalshi", label: "Kalshi" },
+const ALL_TABS = [
+  { id: "chat",        label: "Chat" },
+  { id: "context",     label: "Context" },
+  { id: "memory",      label: "Memory" },
+  { id: "categories",  label: "Categories" },
+  { id: "audit",       label: "Audit" },
+  { id: "logs",        label: "Logs" },
+  { id: "testing",     label: "Testing" },
+  { id: "dualrun",     label: "Dual Run" },
+  { id: "polymarket",  label: "Poly Market" },
+  { id: "kalshi",      label: "Kalshi" },
 ];
 
 export default function Home() {
   const { data: config, isLoading, isError, error } = useConfig();
   const { initFromConfig, activeTab, setActiveTab } = useSettings();
+  const { user, logout } = useAuth();
+
+  // Admins (features === null) see all tabs. Portal users only see enabled ones.
+  const TABS = ALL_TABS.filter(
+    (t) => user?.features == null || user.features[t.id] !== false
+  );
   const [dark, setDark] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [adminOpen, setAdminOpen] = useState(false);
+  const [confirmLogout, setConfirmLogout] = useState(false);
 
-  // The theme class is already applied pre-paint by the inline script in the
-  // root layout; mirror that state so the toggle icon matches on first render.
   useEffect(() => {
     setDark(document.documentElement.classList.contains("dark"));
   }, []);
@@ -74,6 +82,12 @@ export default function Home() {
         <div className="mt-2 text-xs text-[var(--color-fg-subtle)]">
           Is the FastAPI server running? Check NEXT_PUBLIC_API_BASE.
         </div>
+        <button
+          onClick={logout}
+          className="mt-4 flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs text-[var(--color-fg-muted)] border border-[var(--color-border)] hover:bg-[var(--color-surface)] transition-colors"
+        >
+          <LogOut className="h-3.5 w-3.5" /> Log out
+        </button>
       </div>
     );
   }
@@ -93,13 +107,19 @@ export default function Home() {
         <div className="fixed inset-0 z-30 bg-black/30" onClick={() => setSidebarOpen(false)} />
       )}
 
+      {/* Admin panel modal */}
+      {adminOpen && <AdminPanel onClose={() => setAdminOpen(false)} />}
+
       {/* Main */}
       <main className="flex min-w-0 flex-1 flex-col">
         <Tabs.Root value={activeTab} onValueChange={setActiveTab} className="flex min-h-0 flex-1 flex-col">
           <div className="flex items-center gap-2 border-b border-[var(--color-border)] px-2">
+            {/* Hamburger */}
             <Button size="icon" variant="ghost" onClick={() => setSidebarOpen((o) => !o)}>
               <Menu className="h-4 w-4" />
             </Button>
+
+            {/* Tabs */}
             <Tabs.List className="flex flex-1 overflow-x-auto">
               {TABS.map((t) => (
                 <Tabs.Trigger
@@ -115,6 +135,54 @@ export default function Home() {
                 </Tabs.Trigger>
               ))}
             </Tabs.List>
+
+            {/* Right side: user badge + admin btn + logout */}
+            <div className="ml-auto flex shrink-0 items-center gap-1.5 pl-2">
+              {user && (
+                <span className="hidden sm:block text-[0.72rem] text-[var(--color-fg-subtle)] font-mono">
+                  {user.username}
+                </span>
+              )}
+              {user?.role === "admin" && (
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  onClick={() => setAdminOpen(true)}
+                  title="Admin panel"
+                >
+                  <Shield className="h-4 w-4" />
+                </Button>
+              )}
+
+              {/* Logout — shows inline confirm before actually logging out */}
+              {confirmLogout ? (
+                <div className="flex items-center gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1">
+                  <span className="text-xs text-[var(--color-fg-muted)]">Log out?</span>
+                  <button
+                    onClick={logout}
+                    className="rounded px-2 py-0.5 text-xs font-semibold text-red-600 hover:bg-red-50 dark:hover:bg-red-950/40 transition-colors"
+                    autoFocus
+                  >
+                    Yes
+                  </button>
+                  <button
+                    onClick={() => setConfirmLogout(false)}
+                    className="rounded px-2 py-0.5 text-xs text-[var(--color-fg-muted)] hover:bg-[var(--color-bg)] transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  onClick={() => setConfirmLogout(true)}
+                  title="Log out"
+                >
+                  <LogOut className="h-4 w-4" />
+                </Button>
+              )}
+            </div>
           </div>
 
           <div className="min-h-0 flex-1 overflow-hidden">

@@ -12,6 +12,7 @@ import {
   useVoiceConfig,
 } from "@/lib/queries";
 import { useSettings } from "@/lib/store";
+import { useAuth } from "@/lib/authStore";
 import { useTts } from "@/lib/tts";
 import type { DocAttachment, Message, SSEEvent } from "@/lib/types";
 import { ChatMessage } from "@/components/chat/ChatMessage";
@@ -40,9 +41,12 @@ export function ChatTab() {
   const { data: historyData, isLoading } = useHistory(identityId);
   const { data: traceIdx } = useTraceIndex(identityId);
   const { data: voiceCfg } = useVoiceConfig();
+  const { user } = useAuth();
   const invalidate = useIdentityInvalidator();
   const appendHistory = useHistoryAppender();
-  const canSpeak = !!voiceCfg?.enabled;
+  // canSpeak: ElevenLabs must be configured AND the user must have voice feature enabled
+  const voiceFeatureEnabled = user?.role === "admin" || (user?.features?.voice !== false);
+  const canSpeak = !!voiceCfg?.enabled && voiceFeatureEnabled;
 
   const [pending, setPending] = useState<Message[]>([]);
   const [streaming, setStreaming] = useState(false);

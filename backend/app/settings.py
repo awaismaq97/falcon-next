@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     # reaches the browser — every TTS call is proxied through the backend.
     elevenlabs_api_key: str = ""
 
+    # Secret key used for JWT signing and AES-256-GCM username encryption.
+    # Must be at least 32 characters. Set in .env or as an environment variable.
+    # Generate with: python -c "import secrets; print(secrets.token_hex(32))"
+    secret_key: str = ""
+
     @property
     def cors_origin_list(self) -> list[str]:
         raw = (self.cors_origins or "").strip()
