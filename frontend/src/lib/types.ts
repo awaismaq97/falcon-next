@@ -311,6 +311,9 @@ export interface WatcherStatus {
   running: boolean;
   enabled: boolean;
 }
+
+// Dual-run
+export interface DualRunSide {
   text: string;
   tokens: Record<string, number>;
   timestamp: string;
