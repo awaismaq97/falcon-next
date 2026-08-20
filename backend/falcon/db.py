@@ -200,6 +200,13 @@ def _ensure_indexes_async(db: Database) -> None:
             db["admin_users"].create_index("created_at")
             db["portal_users"].create_index("created_at")
             db["admin_audit_log"].create_index("timestamp")
+            # Watcher indexes
+            db["watcher_log"].create_index("identity_id")
+            db["watcher_log"].create_index("recorded_at")
+            db["watcher_log"].create_index([("identity_id", 1), ("recorded_at", -1)])
+            db["watcher_processed"].create_index("msg_id", unique=True)
+            db["watcher_processed"].create_index("identity_id")
+            db["watcher_settings"].create_index("identity_id", unique=True)
         except Exception as exc:
             logger.warning("index creation failed (queries still work): %s", exc)
 

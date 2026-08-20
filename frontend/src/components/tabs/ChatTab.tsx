@@ -10,6 +10,8 @@ import {
   useIdentityInvalidator,
   useHistoryAppender,
   useVoiceConfig,
+  useWatcherStatus,
+  useWatcherResultPoller,
 } from "@/lib/queries";
 import { useSettings } from "@/lib/store";
 import { useAuth } from "@/lib/authStore";
@@ -44,6 +46,8 @@ export function ChatTab() {
   const { user } = useAuth();
   const invalidate = useIdentityInvalidator();
   const appendHistory = useHistoryAppender();
+  // Poll watcher log count; invalidates history only when a new result is injected.
+  useWatcherResultPoller(identityId);
   // canSpeak: ElevenLabs must be configured AND the user must have voice feature enabled
   const voiceFeatureEnabled = user?.role === "admin" || (user?.features?.voice !== false);
   const canSpeak = !!voiceCfg?.enabled && voiceFeatureEnabled;

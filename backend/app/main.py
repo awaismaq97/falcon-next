@@ -55,10 +55,22 @@ async def lifespan(app: FastAPI):
         except Exception as seed_exc:
             logger.warning("Admin seed skipped: %s", seed_exc)
 
+        # Start watcher threads for any identities with watcher_enabled=True.
+        try:
+            from falcon.watcher import bootstrap_watchers
+            bootstrap_watchers()
+        except Exception as watcher_exc:
+            logger.warning("Watcher bootstrap skipped: %s", watcher_exc)
+
     except Exception as exc:  # noqa: BLE001
         logger.warning("MongoDB warmup skipped (will retry lazily): %s", exc)
     yield
-    # Graceful shutdown: close the shared MongoClient.
+    # Graceful shutdown: stop all watchers, then close the shared MongoClient.
+    try:
+        from falcon.watcher import stop_all_watchers
+        stop_all_watchers()
+    except Exception:  # noqa: BLE001
+        pass
     try:
         from falcon.db import close_db
 
@@ -127,6 +139,7 @@ def create_app() -> FastAPI:
         testing,
         traces,
         voice,
+        watcher as watcher_router,
     )
 
     prefix = settings.api_prefix
@@ -142,6 +155,7 @@ def create_app() -> FastAPI:
     app.include_router(voice.router, prefix=prefix)
     app.include_router(documents.router, prefix=prefix)
     app.include_router(categories_router.router, prefix=prefix)
+    app.include_router(watcher_router.router, prefix=prefix)
 
     return app
 

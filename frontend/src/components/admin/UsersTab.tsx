@@ -10,6 +10,7 @@ import {
   UserCheck,
   UserX,
   RefreshCw,
+  Bot,
 } from "lucide-react";
 import { adminApi, ALL_FEATURES, type PortalUser } from "@/lib/adminApi";
 import { cn } from "@/lib/utils";
@@ -26,6 +27,7 @@ const FEATURE_LABELS: Record<string, string> = {
   polymarket: "Poly Market",
   kalshi: "Kalshi",
   voice: "Voice",
+  watcher: "Watcher",
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -39,12 +41,25 @@ export function UsersTab() {
   const [editUser, setEditUser] = useState<PortalUser | null>(null);
   const [permUser, setPermUser] = useState<PortalUser | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
+  // Tracks per-user watcher_enabled state fetched alongside the user list.
+  // Stored separately so toggling doesn't require a full list reload.
+  const [watcherStates, setWatcherStates] = useState<Record<string, boolean>>({});
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      setUsers(await adminApi.listUsers());
+      const list = await adminApi.listUsers();
+      setUsers(list);
+      // Fetch watcher_enabled from the portal_users collection via user list
+      // (the API returns it inside each user doc when present).
+      const states: Record<string, boolean> = {};
+      list.forEach((u) => {
+        // watcher_enabled is stored on the DB doc but not in the typed PortalUser;
+        // cast to any to read it if the backend sends it.
+        states[u.id] = !!(u as any).watcher_enabled;
+      });
+      setWatcherStates(states);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -69,6 +84,18 @@ export function UsersTab() {
       await adminApi.updateUser(user.id, { disabled: !user.disabled });
       await load();
     } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+
+  async function handleWatcherToggle(user: PortalUser) {
+    const next = !watcherStates[user.id];
+    setWatcherStates((prev) => ({ ...prev, [user.id]: next }));
+    try {
+      await adminApi.setWatcher(user.id, next);
+    } catch (e) {
+      // Revert on error
+      setWatcherStates((prev) => ({ ...prev, [user.id]: !next }));
       setError((e as Error).message);
     }
   }
@@ -153,9 +180,11 @@ export function UsersTab() {
                 key={user.id}
                 user={user}
                 deleteConfirm={deleteConfirm}
+                watcherEnabled={!!watcherStates[user.id]}
                 onEdit={() => openEdit(user)}
                 onPerms={() => openPerms(user)}
                 onToggleDisable={() => handleToggleDisable(user)}
+                onWatcherToggle={() => handleWatcherToggle(user)}
                 onDeleteRequest={() => setDeleteConfirm(user.id)}
                 onDeleteConfirm={() => handleDelete(user.id)}
                 onDeleteCancel={() => setDeleteConfirm(null)}
@@ -168,7 +197,7 @@ export function UsersTab() {
             <table className="w-full text-sm">
               <thead className="bg-[var(--color-surface)]">
                 <tr>
-                  {["Username", "Display Name", "Status", "Features", "Created", ""].map((h) => (
+                  {["Username", "Display Name", "Status", "Features", "Watcher", "Created", ""].map((h) => (
                     <th key={h} className="px-4 py-3 text-left text-xs font-medium text-[var(--color-fg-muted)]">
                       {h}
                     </th>
@@ -190,6 +219,22 @@ export function UsersTab() {
                     </td>
                     <td className="px-4 py-3">
                       <FeaturePills features={user.features} />
+                    </td>
+                    <td className="px-4 py-3">
+                      {/* Watcher toggle */}
+                      <button
+                        onClick={() => handleWatcherToggle(user)}
+                        title={watcherStates[user.id] ? "Disable watcher" : "Enable watcher"}
+                        className={cn(
+                          "flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[0.68rem] font-medium border transition-colors",
+                          watcherStates[user.id]
+                            ? "border-green-300 bg-green-50 text-green-700 hover:bg-green-100 dark:border-green-800 dark:bg-green-950/40 dark:text-green-300"
+                            : "border-[var(--color-border)] text-[var(--color-fg-subtle)] hover:bg-[var(--color-surface)] hover:text-[var(--color-fg)]"
+                        )}
+                      >
+                        <Bot className="h-3 w-3" />
+                        {watcherStates[user.id] ? "On" : "Off"}
+                      </button>
                     </td>
                     <td className="px-4 py-3 text-[0.75rem] text-[var(--color-fg-subtle)] whitespace-nowrap">
                       {user.created_at ? new Date(user.created_at).toLocaleDateString() : "—"}
@@ -232,18 +277,22 @@ export function UsersTab() {
 function UserCard({
   user,
   deleteConfirm,
+  watcherEnabled,
   onEdit,
   onPerms,
   onToggleDisable,
+  onWatcherToggle,
   onDeleteRequest,
   onDeleteConfirm,
   onDeleteCancel,
 }: {
   user: PortalUser;
   deleteConfirm: string | null;
+  watcherEnabled: boolean;
   onEdit: () => void;
   onPerms: () => void;
   onToggleDisable: () => void;
+  onWatcherToggle: () => void;
   onDeleteRequest: () => void;
   onDeleteConfirm: () => void;
   onDeleteCancel: () => void;
@@ -286,7 +335,7 @@ function UserCard({
           </button>
         </div>
       ) : (
-        <div className="grid grid-cols-4 gap-2">
+        <div className="grid grid-cols-5 gap-2">
           <MobileActionBtn onClick={onEdit} label="Edit" icon={<Pencil className="h-4 w-4" />} />
           <MobileActionBtn onClick={onPerms} label="Perms" icon={<Eye className="h-4 w-4" />} />
           <MobileActionBtn
@@ -295,6 +344,11 @@ function UserCard({
             icon={user.disabled
               ? <UserCheck className="h-4 w-4 text-green-600" />
               : <UserX className="h-4 w-4 text-amber-500" />}
+          />
+          <MobileActionBtn
+            onClick={onWatcherToggle}
+            label={watcherEnabled ? "Watcher ✓" : "Watcher"}
+            icon={<Bot className={cn("h-4 w-4", watcherEnabled ? "text-green-600" : "")} />}
           />
           <MobileActionBtn onClick={onDeleteRequest} label="Delete" icon={<Trash2 className="h-4 w-4 text-red-500" />} danger />
         </div>

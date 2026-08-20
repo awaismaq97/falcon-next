@@ -1,7 +1,8 @@
 "use client";
 
+import { useEffect } from "react";
 import { useQuery, useQueryClient, useInfiniteQuery } from "@tanstack/react-query";
-import { api } from "./api";
+import { api, API_BASE } from "./api";
 import { fetchPolyFeed } from "./polymarket";
 import { fetchKalshiFeed } from "./kalshi";
 import type { Category, MemoryType, Message } from "./types";
@@ -30,6 +31,8 @@ export const qk = {
   kalshi: (limit: number) => ["kalshi", limit] as const,
   categories: (id: string) => ["categories", id] as const,
   categoryMessages: (id: string, categoryId: string) => ["category-messages", id, categoryId] as const,
+  watcherStatus: (id: string) => ["watcher-status", id] as const,
+  watcherLog: (id: string) => ["watcher-log", id] as const,
 };
 
 export const useConfig = () => useQuery({ queryKey: qk.config, queryFn: api.getConfig, staleTime: Infinity });
@@ -147,6 +150,82 @@ export const useCategoryMessages = (id: string, categoryId: string, skip = 0, li
     enabled: !!id && !!categoryId,
     staleTime: 10 * 1000,
   });
+
+export const useWatcherStatus = (id: string) =>
+  useQuery({
+    queryKey: qk.watcherStatus(id),
+    queryFn: () => api.watcherStatus(id),
+    enabled: !!id,
+    refetchInterval: 5_000,
+    staleTime: 0,  // always refetch when invalidated
+  });
+
+export const useWatcherLog = (id: string, limit = 50) =>
+  useQuery({
+    queryKey: qk.watcherLog(id),
+    queryFn: () => api.watcherLog(id, limit),
+    enabled: !!id,
+    staleTime: 10_000,
+    refetchInterval: 10_000,
+  });
+
+/**
+ * Subscribes to the watcher SSE stream for instant result delivery.
+ * When a watcher_result event arrives, appends it directly to the
+ * history cache — no polling, no delay.
+ */
+export function useWatcherResultPoller(id: string) {
+  const qc = useQueryClient();
+
+  useEffect(() => {
+    if (!id) return;
+
+    const token = typeof window !== "undefined"
+      ? localStorage.getItem("falcon-auth-token")
+      : null;
+
+    const url = `${API_BASE}/api/identities/${encodeURIComponent(id)}/watcher/stream`;
+    const es = new EventSource(
+      token ? `${url}?token=${encodeURIComponent(token)}` : url
+    );
+
+    es.addEventListener("watcher_result", (e: MessageEvent) => {
+      try {
+        const msg = JSON.parse(e.data);
+        // Append the injected result directly into the history cache.
+        qc.setQueryData<{ identity_id: string; messages: unknown[]; count: number }>(
+          qk.history(id),
+          (old) => {
+            if (!old) return old;
+            const newMsg = {
+              role: "assistant",
+              content: msg.content ?? "",
+              timestamp: msg.timestamp ?? "",
+              _watcher: true,
+            };
+            return {
+              ...old,
+              messages: [...old.messages, newMsg],
+              count: old.count + 1,
+            };
+          }
+        );
+        // Also refresh the watcher log panel.
+        qc.invalidateQueries({ queryKey: qk.watcherLog(id) });
+      } catch {
+        // malformed event — fallback to full refetch
+        qc.invalidateQueries({ queryKey: qk.history(id) });
+      }
+    });
+
+    es.onerror = () => {
+      // On connection error fall back to a single refetch so nothing is lost.
+      qc.invalidateQueries({ queryKey: qk.history(id) });
+    };
+
+    return () => es.close();
+  }, [id, qc]);
+}
 
 /** Convenience: invalidate everything scoped to one identity after a turn/edit.
  *  Pass `{ includeHistory: false }` when the history cache was already updated

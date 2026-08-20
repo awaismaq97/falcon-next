@@ -41,10 +41,20 @@ function CopyButton({ text }: { text: string }) {
   return (
     <button
       onClick={() => {
-        navigator.clipboard.writeText(text).then(() => {
+        const doCopy = () => {
           setCopied(true);
           setTimeout(() => setCopied(false), 1100);
-        });
+        };
+        if (navigator.clipboard?.writeText) {
+          navigator.clipboard.writeText(text).then(doCopy).catch(() => {
+            // clipboard API failed — fall back
+            fallbackCopy(text);
+            doCopy();
+          });
+        } else {
+          fallbackCopy(text);
+          doCopy();
+        }
       }}
       className="rounded-md p-1 text-black hover:bg-[var(--color-surface-2)] hover:text-black dark:text-white dark:hover:text-white"
       title="Copy"
@@ -52,6 +62,17 @@ function CopyButton({ text }: { text: string }) {
       {copied ? <Check className="h-3.5 w-3.5 text-[var(--color-green)]" /> : <Copy className="h-3.5 w-3.5" />}
     </button>
   );
+}
+
+function fallbackCopy(text: string) {
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.cssText = "position:fixed;top:0;left:0;opacity:0;pointer-events:none";
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
+  try { document.execCommand("copy"); } catch { /* silent */ }
+  document.body.removeChild(ta);
 }
 
 function ToolEvents({ events }: { events: NonNullable<Message["_events"]> }) {
@@ -102,9 +123,8 @@ export const ChatMessage = memo(function ChatMessage({
   canSpeak?: boolean;
 }) {
   const isUser = message.role === "user";
+  const isWatcher = !!(message as any)._watcher;
   const hasContext = !!contextTs;
-  // A persisted assistant message with real text can be read aloud. Keyed on its
-  // timestamp so the button reflects that exact message's playback state.
   const ttsId = message.timestamp || "";
   const canSpeakThis = canSpeak && !!ttsId && !message._suppressed && !!message.content;
 
@@ -113,6 +133,33 @@ export const ChatMessage = memo(function ChatMessage({
       <div className="flex justify-end px-4 py-1.5">
         <div className="max-w-[85%] rounded-2xl bg-[var(--color-user-bubble)] px-4 py-2.5">
           <Markdown>{message.content}</Markdown>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Watcher result — visually distinct block ───────────────────────────
+  if (isWatcher) {
+    // Strip the [AGENT RESULT] / [/AGENT RESULT] delimiters for clean display;
+    // they're already conveyed by the surrounding UI chrome.
+    const inner = message.content
+      .replace(/^\[AGENT RESULT\]\s*/i, "")
+      .replace(/\s*\[\/AGENT RESULT\]$/i, "")
+      .trim();
+    return (
+      <div className="px-4 py-1.5">
+        <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">
+          {/* Header bar */}
+          <div className="flex items-center gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5">
+            <span className="text-[0.7rem] font-semibold uppercase tracking-wider text-[var(--color-fg-subtle)]">
+              ⚙ Agent Result
+            </span>
+            <CopyButton text={inner} />
+          </div>
+          {/* Body */}
+          <div className="px-3 py-2.5">
+            <Markdown>{inner || "[no output]"}</Markdown>
+          </div>
         </div>
       </div>
     );

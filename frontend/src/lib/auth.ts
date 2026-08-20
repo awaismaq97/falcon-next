@@ -7,7 +7,7 @@
  * All API calls in api.ts that need auth should use getAuthHeaders().
  */
 
-import { API_BASE } from "./api";
+import { API_BASE } from "./config";
 
 const TOKEN_KEY = "falcon-auth-token";
 const USER_KEY = "falcon-auth-user";

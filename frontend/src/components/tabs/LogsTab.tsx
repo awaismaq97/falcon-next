@@ -3,16 +3,177 @@
 import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { Download, Trash2, ScrollText } from "lucide-react";
+import { Download, Trash2, ScrollText, Bot, ChevronDown, ChevronRight } from "lucide-react";
 import { api } from "@/lib/api";
-import { useHistory, useTraceIndex } from "@/lib/queries";
+import { useHistory, useTraceIndex, useWatcherStatus, useWatcherLog, qk } from "@/lib/queries";
 import { useSettings } from "@/lib/store";
-import type { Message, TraceStep } from "@/lib/types";
+import type { Message, TraceStep, WatcherLogEntry } from "@/lib/types";
 import { Button, Textarea, Badge, Spinner } from "@/components/ui/primitives";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { JsonView } from "@/components/JsonView";
 import { cn, downloadJSON, fmtTime } from "@/lib/utils";
 import { toast } from "@/components/ui/toast";
+
+// ---------------------------------------------------------------------------
+// Watcher log panel
+// ---------------------------------------------------------------------------
+
+function WatcherLogEntry({ entry }: { entry: WatcherLogEntry }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-2.5">
+      <div className="flex items-center gap-2">
+        <Badge color={entry.error ? "red" : "green"}>
+          {entry.error ? "error" : "ok"}
+        </Badge>
+        <span className="font-mono text-[0.8rem] font-medium text-[var(--color-fg)]">
+          {entry.command}
+        </span>
+        <span className="ml-auto flex items-center gap-2">
+          <span className="font-mono text-[0.68rem] text-[var(--color-fg-subtle)]">
+            {entry.latency_ms}ms
+          </span>
+          <span className="font-mono text-[0.68rem] text-[var(--color-fg-subtle)]">
+            {fmtTime(entry.recorded_at)}
+          </span>
+          <button
+            onClick={() => setOpen((o) => !o)}
+            className="rounded p-0.5 text-[var(--color-fg-subtle)] hover:text-[var(--color-fg)]"
+          >
+            {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+          </button>
+        </span>
+      </div>
+      {open && (
+        <div className="mt-2 space-y-1.5 border-t border-[var(--color-border)] pt-2">
+          {entry.payload && (
+            <div>
+              <div className="mb-0.5 text-[0.68rem] font-semibold uppercase tracking-wide text-[var(--color-fg-subtle)]">
+                Payload
+              </div>
+              <pre className="whitespace-pre-wrap break-words rounded bg-[var(--color-surface-2)] px-2 py-1.5 font-mono text-[0.72rem] text-[var(--color-fg)]">
+                {entry.payload}
+              </pre>
+            </div>
+          )}
+          <div>
+            <div className="mb-0.5 text-[0.68rem] font-semibold uppercase tracking-wide text-[var(--color-fg-subtle)]">
+              Result
+            </div>
+            <pre className="whitespace-pre-wrap break-words rounded bg-[var(--color-surface-2)] px-2 py-1.5 font-mono text-[0.72rem] text-[var(--color-fg)]">
+              {entry.result}
+            </pre>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function WatcherLogPanel({ identityId, hideHeader }: { identityId: string; hideHeader?: boolean }) {
+  const qc = useQueryClient();
+  const { data: statusData } = useWatcherStatus(identityId);
+  const { data: logData, isLoading } = useWatcherLog(identityId, 50);
+
+  async function clearLog() {
+    if (!confirm("Clear watcher log for this identity?")) return;
+    try {
+      await api.clearWatcherLog(identityId);
+      qc.invalidateQueries({ queryKey: qk.watcherLog(identityId) });
+      toast.success("Watcher log cleared.");
+    } catch (e) {
+      toast.error((e as Error).message);
+    }
+  }
+
+  const records = logData?.records ?? [];
+
+  return (
+    <div className={hideHeader ? "" : "mt-6"}>
+      {!hideHeader && (
+        /* Section header — only shown when NOT inside the drawer (drawer has its own header) */
+        <div className="mb-3 flex items-center gap-2">
+          <Bot className="h-4 w-4 text-[var(--color-fg-subtle)]" />
+          <h3 className="text-[0.9rem] font-semibold">Watcher Agent Log</h3>
+          <WatcherStatusDot identityId={identityId} />
+          <div className="ml-auto flex items-center gap-2">
+            {records.length > 0 && (
+              <Button size="sm" variant="ghost" onClick={clearLog}>
+                <Trash2 className="h-3.5 w-3.5" /> Clear
+              </Button>
+            )}
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => downloadJSON(`falcon_watcher_log_${identityId}.json`, records)}
+              disabled={records.length === 0}
+            >
+              <Download className="h-3.5 w-3.5" /> Export
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {/* Actions row when inside drawer (hideHeader=true) */}
+      {hideHeader && records.length > 0 && (
+        <div className="flex items-center justify-end gap-2 border-b border-[var(--color-border)] px-4 py-1">
+          <Button size="sm" variant="ghost" onClick={clearLog}>
+            <Trash2 className="h-3.5 w-3.5" /> Clear
+          </Button>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => downloadJSON(`falcon_watcher_log_${identityId}.json`, records)}
+          >
+            <Download className="h-3.5 w-3.5" /> Export
+          </Button>
+        </div>
+      )}
+
+      {isLoading ? (
+        <div className="flex items-center gap-2 px-4 py-3 text-[var(--color-fg-subtle)]">
+          <Spinner /> Loading…
+        </div>
+      ) : records.length === 0 ? (
+        <p className="px-4 py-3 text-[0.82rem] text-[var(--color-fg-subtle)]">
+          No watcher invocations yet.{" "}
+          {!statusData?.enabled && (
+            <span>Enable the watcher in Admin Panel → Users tab.</span>
+          )}
+        </p>
+      ) : (
+        <div className="space-y-1.5 px-4 py-2">
+          {records.map((r, i) => (
+            <WatcherLogEntry key={i} entry={r} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function WatcherStatusDot({ identityId }: { identityId: string }) {
+  const { data: statusData } = useWatcherStatus(identityId);
+  return (
+    <span className="flex items-center gap-1.5 rounded-full border border-[var(--color-border)] px-2 py-0.5 text-[0.7rem]">
+      <span
+        className={cn(
+          "inline-block h-1.5 w-1.5 rounded-full",
+          statusData?.running
+            ? "bg-green-500"
+            : statusData?.enabled
+            ? "bg-amber-400"
+            : "bg-[var(--color-fg-subtle)]",
+        )}
+      />
+      {statusData?.running ? "running" : statusData?.enabled ? "starting" : "disabled"}
+    </span>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Trace dialog
+// ---------------------------------------------------------------------------
 
 function TraceDialog({ identityId, ts, open, onOpenChange }: { identityId: string; ts: string; open: boolean; onOpenChange: (v: boolean) => void }) {
   const [steps, setSteps] = useState<TraceStep[] | null>(null);
@@ -73,6 +234,43 @@ export function LogsTab() {
   const [traceTs, setTraceTs] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
+  // Watcher drawer state
+  const DRAWER_MIN = 44;   // collapsed — just the header bar visible
+  const DRAWER_MAX = 600;  // max draggable height
+  const DRAWER_DEFAULT = 220;
+  const [drawerHeight, setDrawerHeight] = useState(DRAWER_DEFAULT);
+  const [drawerOpen, setDrawerOpen] = useState(true);
+  const dragRef = useRef<{ startY: number; startH: number } | null>(null);
+
+  function onDragStart(e: React.MouseEvent) {
+    e.preventDefault();
+    dragRef.current = { startY: e.clientY, startH: drawerHeight };
+    const onMove = (ev: MouseEvent) => {
+      if (!dragRef.current) return;
+      const delta = dragRef.current.startY - ev.clientY; // drag up = larger
+      const next = Math.min(DRAWER_MAX, Math.max(DRAWER_MIN, dragRef.current.startH + delta));
+      setDrawerHeight(next);
+      setDrawerOpen(next > DRAWER_MIN + 10);
+    };
+    const onUp = () => {
+      dragRef.current = null;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
+
+  function toggleDrawer() {
+    if (drawerOpen) {
+      setDrawerHeight(DRAWER_MIN);
+      setDrawerOpen(false);
+    } else {
+      setDrawerHeight(DRAWER_DEFAULT);
+      setDrawerOpen(true);
+    }
+  }
+
   useEffect(() => {
     const msgs = data?.messages ?? [];
     setEntries(msgs);
@@ -80,14 +278,8 @@ export function LogsTab() {
   }, [data]);
 
   const traceSet = new Set(traceIdx?.timestamps ?? []);
-
-  // Display newest-first — reverse index mapping so the virtualizer shows
-  // the most recent message at the top without mutating the source array.
   const displayCount = entries.length;
 
-  // Virtualize the (potentially thousands of) message rows so only what's on
-  // screen is mounted. Rows vary in height, so the virtualizer measures each one
-  // (ResizeObserver-backed) instead of assuming a fixed size.
   const scrollParentRef = useRef<HTMLDivElement>(null);
   const rowVirtualizer = useVirtualizer({
     count: displayCount,
@@ -138,8 +330,8 @@ export function LogsTab() {
   }
 
   return (
-    <div className="flex h-full flex-col">
-      {/* Fixed header — stays put while the list below scrolls */}
+    <div className="flex h-full flex-col overflow-hidden">
+      {/* ── Fixed header ── */}
       <div className="shrink-0 border-b border-[var(--color-border)] px-5 py-4">
         <div className="mx-auto flex max-w-4xl items-center justify-between gap-2">
           <div className="min-w-0">
@@ -171,7 +363,7 @@ export function LogsTab() {
         </div>
       </div>
 
-      {/* Scroll container — this is the virtualizer's scroll element */}
+      {/* ── Message list — fills remaining space above the drawer ── */}
       <div ref={scrollParentRef} className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto max-w-4xl px-5">
           {isLoading ? (
@@ -190,7 +382,6 @@ export function LogsTab() {
           ) : (
             <div style={{ height: rowVirtualizer.getTotalSize(), position: "relative" }}>
               {rowVirtualizer.getVirtualItems().map((vi) => {
-                // vi.index 0 = newest message (reversed display)
                 const idx = entries.length - 1 - vi.index;
                 const m = entries[idx];
                 return (
@@ -215,10 +406,7 @@ export function LogsTab() {
                               </button>
                             )}
                             <button
-                              onClick={() => {
-                                setEditIdx(idx);
-                                setEditVal(m.content);
-                              }}
+                              onClick={() => { setEditIdx(idx); setEditVal(m.content); }}
                               className="rounded px-1.5 py-1 text-[0.72rem] text-[var(--color-fg-subtle)] hover:text-[var(--color-fg)]"
                             >
                               edit
@@ -232,12 +420,8 @@ export function LogsTab() {
                           <div className="space-y-2">
                             <Textarea rows={3} value={editVal} onChange={(e) => setEditVal(e.target.value)} />
                             <div className="flex gap-2">
-                              <Button size="sm" variant="primary" onClick={() => saveEdit(idx)}>
-                                Save
-                              </Button>
-                              <Button size="sm" variant="ghost" onClick={() => setEditIdx(null)}>
-                                Cancel
-                              </Button>
+                              <Button size="sm" variant="primary" onClick={() => saveEdit(idx)}>Save</Button>
+                              <Button size="sm" variant="ghost" onClick={() => setEditIdx(null)}>Cancel</Button>
                             </div>
                           </div>
                         ) : (
@@ -251,6 +435,44 @@ export function LogsTab() {
             </div>
           )}
         </div>
+      </div>
+
+      {/* ── Watcher drawer — resizable bottom panel ── */}
+      <div
+        className="shrink-0 border-t border-[var(--color-border)] bg-[var(--color-bg)] flex flex-col"
+        style={{ height: drawerHeight, transition: dragRef.current ? "none" : "height 0.15s ease" }}
+      >
+        {/* Drag handle */}
+        <div
+          onMouseDown={onDragStart}
+          className="flex h-1.5 w-full cursor-row-resize items-center justify-center group"
+          title="Drag to resize"
+        >
+          <div className="h-1 w-10 rounded-full bg-[var(--color-border)] group-hover:bg-[var(--color-fg-subtle)] transition-colors" />
+        </div>
+
+        {/* Drawer header */}
+        <div className="flex shrink-0 items-center gap-2 border-b border-[var(--color-border)] px-4 py-1.5">
+          <Bot className="h-3.5 w-3.5 text-[var(--color-fg-subtle)]" />
+          <span className="text-[0.8rem] font-semibold">Watcher Agent Log</span>
+          {/* Running indicator */}
+          <WatcherStatusDot identityId={identityId} />
+          {/* Toggle collapse / expand */}
+          <button
+            onClick={toggleDrawer}
+            className="ml-auto rounded p-1 text-[var(--color-fg-subtle)] hover:text-[var(--color-fg)] transition-colors"
+            title={drawerOpen ? "Collapse" : "Expand"}
+          >
+            <ChevronDown className={cn("h-3.5 w-3.5 transition-transform", !drawerOpen && "rotate-180")} />
+          </button>
+        </div>
+
+        {/* Drawer body — scrollable log list */}
+        {drawerOpen && (
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            <WatcherLogPanel identityId={identityId} hideHeader />
+          </div>
+        )}
       </div>
 
       {traceTs && (

@@ -48,6 +48,7 @@ DEFAULT_FEATURES: dict[str, bool] = {
     "polymarket": True,
     "kalshi": True,
     "voice": True,
+    "watcher": False,   # opt-in — admin must explicitly enable per user
 }
 
 
@@ -68,6 +69,8 @@ def _serialize(doc: dict) -> dict:
         out["username"] = "<encrypted>"
     out.pop("username_enc", None)
     out.pop("password_hash", None)  # never return the hash
+    # Ensure watcher_enabled is always present so the frontend doesn't need a null check
+    out.setdefault("watcher_enabled", False)
     return out
 
 

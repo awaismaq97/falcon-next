@@ -17,6 +17,7 @@ export const ALL_FEATURES = [
   "polymarket",
   "kalshi",
   "voice",
+  "watcher",
 ] as const;
 
 export type FeatureKey = (typeof ALL_FEATURES)[number];
@@ -112,6 +113,18 @@ export const adminApi = {
     adminReq<PortalUser>(
       `/api/admin/users/${encodeURIComponent(id)}/permissions`,
       { method: "PUT", body: JSON.stringify({ features }) }
+    ),
+
+  setWatcher: (id: string, enabled: boolean) =>
+    adminReq<{ user_id: string; identity_id: string; watcher_enabled: boolean; running: boolean }>(
+      `/api/admin/users/${encodeURIComponent(id)}/watcher`,
+      { method: "POST", body: JSON.stringify({ enabled }) }
+    ),
+
+  setWatcherForIdentity: (identityId: string, enabled: boolean) =>
+    adminReq<{ identity_id: string; watcher_enabled: boolean; running: boolean }>(
+      `/api/identities/${encodeURIComponent(identityId)}/watcher/toggle`,
+      { method: "POST", body: JSON.stringify({ enabled }) }
     ),
 
   // Audit log

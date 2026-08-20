@@ -31,7 +31,9 @@ import type {
   ExtractResult,
 } from "./types";
 
-export const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "";
+export { API_BASE } from "./config";
+import { API_BASE } from "./config";
+import { getAuthHeaders } from "./auth";
 
 // Non-streaming requests get a hard timeout so a hung backend fails fast with a
 // clear message instead of leaving the UI spinning forever. (The SSE send path
@@ -321,4 +323,27 @@ export const api = {
 
   exportCategoryPdf: (id: string, categoryId: string): string =>
     `${API_BASE}/api/identities/${encodeURIComponent(id)}/categories/${encodeURIComponent(categoryId)}/export.pdf`,
+
+  // ── Watcher ────────────────────────────────────────────────────────────────
+  watcherStatus: (id: string) =>
+    req<import("./types").WatcherStatus>(
+      `/api/identities/${encodeURIComponent(id)}/watcher/status`,
+      { headers: getAuthHeaders() },
+    ),
+  watcherLog: (id: string, limit = 50) =>
+    req<{ records: import("./types").WatcherLogEntry[]; count: number }>(
+      `/api/identities/${encodeURIComponent(id)}/watcher/log?limit=${limit}`,
+      { headers: getAuthHeaders() },
+    ),
+  clearWatcherLog: (id: string) =>
+    req<{ deleted_count: number }>(
+      `/api/identities/${encodeURIComponent(id)}/watcher/log`,
+      { method: "DELETE", headers: getAuthHeaders() },
+    ),
+  setWatcherEnabled: (userId: string, enabled: boolean) =>
+    req<{ user_id: string; identity_id: string; watcher_enabled: boolean; running: boolean }>(
+      `/api/admin/users/${encodeURIComponent(userId)}/watcher`,
+      { method: "POST", body: JSON.stringify({ enabled }), headers: getAuthHeaders() },
+    ),
+  watcherTools: () => req<{ tools: string[] }>("/api/watcher/tools"),
 };

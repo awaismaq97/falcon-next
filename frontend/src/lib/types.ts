@@ -291,8 +291,26 @@ export interface CategoryMessagesPage {
   limit: number;
 }
 
-// Dual-run
-export interface DualRunSide {
+// ---------------------------------------------------------------------------
+// Watcher
+// ---------------------------------------------------------------------------
+
+export interface WatcherLogEntry {
+  identity_id: string;
+  msg_id: string;
+  command: string;
+  payload: string;
+  result: string;
+  latency_ms: number;
+  error: boolean;
+  recorded_at: string;
+}
+
+export interface WatcherStatus {
+  identity_id: string;
+  running: boolean;
+  enabled: boolean;
+}
   text: string;
   tokens: Record<string, number>;
   timestamp: string;
