@@ -112,15 +112,35 @@ export function ChatTab() {
     setShowJump(!atBottom); // no-op re-render when value is unchanged (React bails)
   }, []);
 
-  // Follow streaming output, but only while the user is at the bottom. Coalesced
-  // into a single rAF so a burst of tokens triggers at most one layout write.
+  // Bring a new turn into view once, as it starts — then hold position. Chasing
+  // streaming output drags text out from under the reader while they are reading
+  // it, so tokens arriving is deliberately not a reason to move the viewport.
+  // The dependency is the turn's existence, not `pending`, so token updates
+  // (which replace `pending` on every chunk) do not re-trigger it.
+  const turnStarted = pending.length > 0;
   useEffect(() => {
-    if (!stickRef.current) return;
+    if (!turnStarted || !stickRef.current) return;
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     rafRef.current = requestAnimationFrame(() => {
       const el = scrollRef.current;
       if (el) el.scrollTop = el.scrollHeight;
     });
+  }, [turnStarted]);
+
+  // Content growing below the fold fires no scroll event, so `onScroll` never
+  // sees the viewport drift away from the bottom while output streams in. Re-run
+  // the same test after each update so "jump to latest" appears as soon as there
+  // is something down there to jump to.
+  useEffect(() => {
+    if (!streaming) return;
+    const id = requestAnimationFrame(() => {
+      const el = scrollRef.current;
+      if (!el) return;
+      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+      stickRef.current = atBottom;
+      setShowJump(!atBottom);
+    });
+    return () => cancelAnimationFrame(id);
   }, [pending, streaming]);
 
   // Reset paging and snap to the newest message on identity switch / first load.

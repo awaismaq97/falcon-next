@@ -30,6 +30,11 @@
 
   --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   --radius-card: 12px;
+
+  /* Pinned to px so the root font-size bump below enlarges text only. Left at
+     Tailwind's default 0.25rem it would scale every padding, gap and icon too,
+     which is a zoom, not a larger typeface. 4px === the old 0.25rem @ 16px. */
+  --spacing: 4px;
 }
 
 :root {
@@ -53,6 +58,13 @@
 html,
 body {
   height: 100%;
+}
+
+/* Base type scale. The UI sizes text in rem throughout (Tailwind's own scale and
+   the ad-hoc `text-[0.85rem]` values alike), so this single value moves all of it
+   together: 18px is the browser default 16px plus two. */
+html {
+  font-size: 18px;
 }
 
 body {
