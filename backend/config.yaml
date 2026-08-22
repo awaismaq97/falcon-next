@@ -248,6 +248,85 @@ assistant_language_patterns:
 # Verdict format: {"verdict": "pass", "reason": "<one sentence>"}
 #              or {"verdict": "suppress", "reason": "<one sentence>"}
 # ──────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────
+# Watcher Persona — injected as an extra system persona for any identity
+# that has the watcher enabled.  Kept up-to-date automatically: whenever
+# spawn_agent registers a new tool it rewrites this block via an AI call
+# and reloads the config so all subsequent turns see the new tool list.
+# ──────────────────────────────────────────────────────────────────
+watcher_persona: |
+  You also have access to an external watcher agent that executes commands on your behalf. When a task requires a tool, emit a command block in your response using this exact format:
+  
+  [AGENT: <command>]
+  <payload>
+  [/AGENT]
+  
+  The opening tag names the command. Everything between the opening and closing [/AGENT] tag is the payload passed to the tool. The closing tag is required — it tells the agent exactly where your command ends and your normal response continues.
+  
+  AVAILABLE COMMANDS:
+  
+  1. automate_x_signup
+  Use when: Create a tool that automates the sign-up process on X (formerly Twitter) using SMTP for email verification.
+  Payload: tool-specific input (see tool documentation).
+  Example:
+  [AGENT: automate_x_signup]
+  <your automate_x_signup input here>
+  [/AGENT]
+  
+  2. echo
+  Use when: user asks you to relay or confirm a piece of text.
+  Payload: the text to echo.
+  Example:
+  [AGENT: echo]
+  This message was relayed successfully.
+  [/AGENT]
+  
+  3. fetch_replies
+  Use when: user asks you to get replies or mentions for a tweet.
+  Payload: tweet URL or tweet ID.
+  Example:
+  [AGENT: fetch_replies]
+  https://twitter.com/user/status/1234567890
+  [/AGENT]
+  
+  4. http_get
+  Use when: user asks you to fetch a URL, check a page, or retrieve API data.
+  Payload: the full URL (must start with http:// or https://).
+  Example:
+  [AGENT: http_get]
+  https://httpbin.org/get
+  [/AGENT]
+  
+  5. ping
+  Use when: user asks if the watcher is alive or wants a timestamp.
+  Payload: none.
+  Example:
+  [AGENT: ping][/AGENT]
+  
+  6. post_tweet
+  Use when: user asks you to post a tweet or message to X/Twitter.
+  Payload: tweet text (max 280 characters).
+  Example:
+  [AGENT: post_tweet]
+  Hello from Falcon — posted automatically.
+  [/AGENT]
+  
+  7. spawn_agent
+  Use when: you need to create a new tool/agent that doesn't exist yet.
+  Payload: free-text description of the capability you need.
+  Example:
+  [AGENT: spawn_agent]
+  Create a tool that sends an email via SMTP.
+  [/AGENT]
+  
+  RULES:
+  - The [/AGENT] closing tag is mandatory. Never omit it.
+  - Place the entire block on its own lines, separate from your explanation text.
+  - You may write normal text before and after the block.
+  - For multiple commands, emit multiple blocks in sequence.
+  - Do not describe what the command will do inside the block — just the payload.
+  - This tools are just dummy for initial testing. If nothing is given but only command is required, use any dummy url etc.
+# ──────────────────────────────────────────────────────────────────
 judge_system_prompt: |
   You are a signal/noise classifier for a minimalist inference channel.
 

@@ -85,7 +85,15 @@ def _make_db() -> Database:
         maxPoolSize=100,
     )
     _client = client
-    db = client["falcon"]
+    # Environment isolation: dev and production share one Atlas cluster but must
+    # not share a database. The watcher makes this non-negotiable — it polls the
+    # messages collection autonomously, so any instance pointed at the same
+    # database will pick up (and execute) commands written by any other. Default
+    # is the production name, so deployments need no new configuration; local
+    # development sets MONGODB_DB=falcon_dev in backend/.env.
+    db_name = os.environ.get("MONGODB_DB", "").strip() or "falcon"
+    db = client[db_name]
+    logger.info("MongoDB database: %s", db_name)
     # Kick off index creation in the background so the first request is not
     # blocked on ~15 sequential create_index round-trips to Atlas. Indexes only
     # affect query speed, not correctness, and on an existing cluster they
@@ -156,6 +164,53 @@ def transaction() -> Iterator[ClientSession | None]:
             yield session
 
 
+# (collection, keys, options) — created individually so one failure cannot
+# cascade. Order is cosmetic; nothing depends on it.
+_INDEX_SPECS: list[tuple[str, object, dict]] = [
+    ("messages", "identity_id", {}),
+    # Compound index so history reads sort by insertion order without a scan
+    ("messages", [("identity_id", 1), ("_id", 1)], {}),
+    ("traces", "identity_id", {}),
+    # Compound index for the user_timestamp lookup used in chat rendering
+    ("traces", [("identity_id", 1), ("user_timestamp", 1)], {}),
+    ("tokens", "identity_id", {"unique": True}),
+    # Audit trail indexes
+    ("audit_log", "identity_id", {}),
+    ("audit_log", "recorded_at", {}),
+    # Memory indexes
+    ("memory", "identity_id", {}),
+    ("memory", [("identity_id", 1), ("memory_type", 1)], {}),
+    ("memory", [("identity_id", 1), ("pinned", -1)], {}),
+    # Conversation summary index
+    ("conversation_summaries", "identity_id", {"unique": True}),
+    # Dual-run log indexes
+    ("dual_run_log", "identity_id", {}),
+    ("dual_run_log", "recorded_at", {}),
+    ("dual_run_log", [("identity_id", 1), ("state_tag", 1)], {}),
+    # Identity registry index
+    ("identities", "identity_id", {"unique": True}),
+    # Categories indexes
+    ("categories", "identity_id", {}),
+    ("categories", [("identity_id", 1), ("name", 1)], {"unique": True}),
+    ("category_messages", "identity_id", {}),
+    ("category_messages", "category_id", {}),
+    ("category_messages", [("identity_id", 1), ("category_id", 1)], {}),
+    ("category_messages", [("identity_id", 1), ("category_id", 1), ("recorded_at", -1)], {}),
+    # Admin system indexes
+    ("admin_users", "created_at", {}),
+    ("portal_users", "created_at", {}),
+    ("admin_audit_log", "timestamp", {}),
+    # Watcher indexes
+    ("watcher_log", "identity_id", {}),
+    ("watcher_log", "recorded_at", {}),
+    ("watcher_log", [("identity_id", 1), ("recorded_at", -1)], {}),
+    # Correctness-critical: the claim mechanism in falcon.watcher._claim()
+    ("watcher_processed", "msg_id", {"unique": True}),
+    ("watcher_processed", "identity_id", {}),
+    ("watcher_settings", "identity_id", {"unique": True}),
+]
+
+
 def _ensure_indexes_async(db: Database) -> None:
     """Create all indexes once per process, in a daemon thread."""
     global _indexes_started
@@ -165,49 +220,32 @@ def _ensure_indexes_async(db: Database) -> None:
         _indexes_started = True
 
     def _build() -> None:
-        try:
-            # Ensure indexes exist (no-op if already present)
-            db["messages"].create_index("identity_id")
-            # Compound index so history reads sort by insertion order without a scan
-            db["messages"].create_index([("identity_id", 1), ("_id", 1)])
-            db["traces"].create_index("identity_id")
-            # Compound index for the user_timestamp lookup used in chat rendering
-            db["traces"].create_index([("identity_id", 1), ("user_timestamp", 1)])
-            db["tokens"].create_index("identity_id", unique=True)
-            # Audit trail indexes
-            db["audit_log"].create_index("identity_id")
-            db["audit_log"].create_index("recorded_at")
-            # Memory indexes
-            db["memory"].create_index("identity_id")
-            db["memory"].create_index([("identity_id", 1), ("memory_type", 1)])
-            db["memory"].create_index([("identity_id", 1), ("pinned", -1)])
-            # Conversation summary index
-            db["conversation_summaries"].create_index("identity_id", unique=True)
-            # Dual-run log indexes
-            db["dual_run_log"].create_index("identity_id")
-            db["dual_run_log"].create_index("recorded_at")
-            db["dual_run_log"].create_index([("identity_id", 1), ("state_tag", 1)])
-            # Identity registry index
-            db["identities"].create_index("identity_id", unique=True)
-            # Categories indexes
-            db["categories"].create_index("identity_id")
-            db["categories"].create_index([("identity_id", 1), ("name", 1)], unique=True)
-            db["category_messages"].create_index("identity_id")
-            db["category_messages"].create_index("category_id")
-            db["category_messages"].create_index([("identity_id", 1), ("category_id", 1)])
-            db["category_messages"].create_index([("identity_id", 1), ("category_id", 1), ("recorded_at", -1)])
-            # Admin system indexes
-            db["admin_users"].create_index("created_at")
-            db["portal_users"].create_index("created_at")
-            db["admin_audit_log"].create_index("timestamp")
-            # Watcher indexes
-            db["watcher_log"].create_index("identity_id")
-            db["watcher_log"].create_index("recorded_at")
-            db["watcher_log"].create_index([("identity_id", 1), ("recorded_at", -1)])
-            db["watcher_processed"].create_index("msg_id", unique=True)
-            db["watcher_processed"].create_index("identity_id")
-            db["watcher_settings"].create_index("identity_id", unique=True)
-        except Exception as exc:
-            logger.warning("index creation failed (queries still work): %s", exc)
+        for coll, keys, opts in _INDEX_SPECS:
+            # Each index is created independently. They used to share one try
+            # block, which meant the first failure silently skipped every index
+            # after it — and watcher_processed.msg_id sits near the end of the
+            # list. That index is not a query optimisation: _claim() relies on
+            # its uniqueness to decide which instance may execute a command, so
+            # losing it to an unrelated failure would let every instance run
+            # every command.
+            try:
+                db[coll].create_index(keys, **opts)
+            except Exception as exc:  # noqa: BLE001
+                level = logger.error if opts.get("unique") else logger.warning
+                level("index creation failed on %s%s: %s", coll, keys, exc)
 
     threading.Thread(target=_build, name="falcon-index-build", daemon=True).start()
+
+
+def ensure_indexes_now(db: Database) -> None:
+    """Create the indexes synchronously. For scripts and one-off setup.
+
+    The normal path is a daemon thread, which a short-lived process kills on
+    exit before it finishes — fine for a server, useless for provisioning a new
+    database. Call this when the indexes must exist before the process ends.
+    """
+    for coll, keys, opts in _INDEX_SPECS:
+        try:
+            db[coll].create_index(keys, **opts)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("index creation failed on %s%s: %s", coll, keys, exc)

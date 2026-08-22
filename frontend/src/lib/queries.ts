@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { useQuery, useQueryClient, useInfiniteQuery } from "@tanstack/react-query";
 import { api, API_BASE } from "./api";
 import { fetchPolyFeed } from "./polymarket";
@@ -33,6 +33,7 @@ export const qk = {
   categoryMessages: (id: string, categoryId: string) => ["category-messages", id, categoryId] as const,
   watcherStatus: (id: string) => ["watcher-status", id] as const,
   watcherLog: (id: string) => ["watcher-log", id] as const,
+  watcherAgents: () => ["watcher-agents"] as const,
 };
 
 export const useConfig = () => useQuery({ queryKey: qk.config, queryFn: api.getConfig, staleTime: Infinity });
@@ -169,13 +170,38 @@ export const useWatcherLog = (id: string, limit = 50) =>
     refetchInterval: 10_000,
   });
 
+/** Registered agents. Only fetched while the manager dialog is open. */
+export const useWatcherAgents = (enabled = true) =>
+  useQuery({
+    queryKey: qk.watcherAgents(),
+    queryFn: () => api.watcherAgents(),
+    enabled,
+    staleTime: 15_000,
+  });
+
 /**
  * Subscribes to the watcher SSE stream for instant result delivery.
  * When a watcher_result event arrives, appends it directly to the
  * history cache — no polling, no delay.
+ *
+ * `busyRef` guards message ordering. The in-flight turn lives in ChatTab's
+ * `pending` state, which renders after everything in the history cache, so a
+ * result appended while the turn is still streaming would jump above the
+ * message that triggered it. A fast watcher answers well within the turn, so
+ * that is the normal case, not an edge case. While busy we skip the optimistic
+ * append and record that something was missed; the caller invokes the returned
+ * function once the turn has settled and refetches instead, letting the server's
+ * insertion order settle the sequence.
+ *
+ * Returns: () => boolean — true when results arrived mid-turn and the caller
+ * should refetch history rather than trust the appended cache.
  */
-export function useWatcherResultPoller(id: string) {
+export function useWatcherResultPoller(
+  id: string,
+  busyRef?: { current: boolean },
+) {
   const qc = useQueryClient();
+  const missedRef = useRef(false);
 
   useEffect(() => {
     if (!id) return;
@@ -192,6 +218,15 @@ export function useWatcherResultPoller(id: string) {
     es.addEventListener("watcher_result", (e: MessageEvent) => {
       try {
         const msg = JSON.parse(e.data);
+
+        // Mid-turn: appending now would render the result above the message it
+        // answers. Defer to a refetch once the turn has settled.
+        if (busyRef?.current) {
+          missedRef.current = true;
+          qc.invalidateQueries({ queryKey: qk.watcherLog(id) });
+          return;
+        }
+
         // Append the injected result directly into the history cache.
         qc.setQueryData<{ identity_id: string; messages: unknown[]; count: number }>(
           qk.history(id),
@@ -224,7 +259,15 @@ export function useWatcherResultPoller(id: string) {
     };
 
     return () => es.close();
-  }, [id, qc]);
+  }, [id, qc, busyRef]);
+
+  // Consumed by ChatTab when a turn finishes. Clears the flag and reports
+  // whether history needs a refetch to restore the true order.
+  return useCallback(() => {
+    if (!missedRef.current) return false;
+    missedRef.current = false;
+    return true;
+  }, []);
 }
 
 /** Convenience: invalidate everything scoped to one identity after a turn/edit.

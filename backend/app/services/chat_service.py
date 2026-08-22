@@ -143,6 +143,34 @@ def build_assembled_payload(req: ChatSendRequest) -> dict:
             retrieval.entries = retrieved_entries
             retrieval.by_type = {k: v for k, v in retrieval.by_type.items() if k != "persona"}
 
+    # ── Watcher persona injection ─────────────────────────────────────────
+    # When the watcher is enabled for this identity, prepend the shared watcher
+    # persona as a pinned pseudo-persona entry so the model knows which tools
+    # are available and how to invoke them.  We only inject it when use_persona
+    # is on (same gate as regular personas) to respect the user's toggle.
+    if s.use_persona:
+        try:
+            from falcon.watcher import get_watcher_persona, is_running
+            if is_running(identity_id):
+                watcher_persona_text = get_watcher_persona()
+                if watcher_persona_text:
+                    watcher_persona_entry = {
+                        "memory_type": "persona",
+                        "content": watcher_persona_text,
+                        "tags": ["watcher", "system"],
+                        "pinned": True,
+                        "source": "watcher",
+                        "_id": "_watcher_persona",
+                    }
+                    # Prepend — watcher persona always leads other personas so
+                    # it establishes context before identity-specific personas.
+                    retrieved_entries = [watcher_persona_entry] + retrieved_entries
+                    if retrieval is not None:
+                        retrieval.entries = retrieved_entries
+                        retrieval.by_type.setdefault("persona", []).insert(0, watcher_persona_entry)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("chat: watcher persona injection failed for identity=%s: %s", identity_id, exc)
+
     history = Identity.load_history(identity_id)
     messages_for_model = [{"role": m["role"], "content": m["content"]} for m in history]
     # Attached documents are injected into this turn's user message (after memory

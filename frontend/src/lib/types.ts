@@ -312,6 +312,18 @@ export interface WatcherStatus {
   enabled: boolean;
 }
 
+export interface WatcherAgent {
+  name: string;
+  /** "generated" tools were spawned at runtime and carry their source. */
+  kind: "builtin" | "generated";
+  deletable: boolean;
+  /** Spawn prompt for generated tools; first docstring line for built-ins. */
+  summary: string;
+  code: string | null;
+  revision: number | null;
+  created_at: string | null;
+}
+
 // Dual-run
 export interface DualRunSide {
   text: string;

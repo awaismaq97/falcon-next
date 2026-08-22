@@ -55,6 +55,24 @@ async def lifespan(app: FastAPI):
         except Exception as seed_exc:
             logger.warning("Admin seed skipped: %s", seed_exc)
 
+        # Load dynamically spawned watcher tools before any watcher thread can
+        # dispatch, so a tool created in an earlier run is available immediately
+        # rather than only after dispatch's self-healing lookup.
+        try:
+            import falcon.watcher_tools as watcher_tools
+            from falcon.watcher_generated import ensure_loaded
+
+            ensure_loaded()
+            # Logged with the pid so a stale worker (uvicorn --reload on Windows
+            # can fail to replace it) is obvious when comparing against
+            # GET /api/watcher/debug.
+            logger.info(
+                "Watcher tools ready in pid %s: %s",
+                os.getpid(), ", ".join(watcher_tools.list_tools()),
+            )
+        except Exception as gen_exc:
+            logger.warning("Generated watcher tools not loaded: %s", gen_exc)
+
         # Start watcher threads for any identities with watcher_enabled=True.
         try:
             from falcon.watcher import bootstrap_watchers
@@ -67,8 +85,9 @@ async def lifespan(app: FastAPI):
     yield
     # Graceful shutdown: stop all watchers, then close the shared MongoClient.
     try:
-        from falcon.watcher import stop_all_watchers
+        from falcon.watcher import stop_all_watchers, stop_result_broadcaster
         stop_all_watchers()
+        stop_result_broadcaster()
     except Exception:  # noqa: BLE001
         pass
     try:

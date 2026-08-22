@@ -46,8 +46,11 @@ export function ChatTab() {
   const { user } = useAuth();
   const invalidate = useIdentityInvalidator();
   const appendHistory = useHistoryAppender();
-  // Poll watcher log count; invalidates history only when a new result is injected.
-  useWatcherResultPoller(identityId);
+  // Live watcher results over SSE. The ref lets the stream know a turn is
+  // in flight so a fast result doesn't render above the message it answers;
+  // consumeWatcherBacklog() reports whether any were held back.
+  const turnInFlight = useRef(false);
+  const consumeWatcherBacklog = useWatcherResultPoller(identityId, turnInFlight);
   // canSpeak: ElevenLabs must be configured AND the user must have voice feature enabled
   const voiceFeatureEnabled = user?.role === "admin" || (user?.features?.voice !== false);
   const canSpeak = !!voiceCfg?.enabled && voiceFeatureEnabled;
@@ -207,6 +210,7 @@ export function ChatTab() {
       { role: "assistant", content: "", timestamp: "", _streaming: true, _events: undefined },
     ]);
     setStreaming(true);
+    turnInFlight.current = true;
     setVisible((v) => v + 2);
     stickRef.current = true; // a new turn always follows to the bottom
     setShowJump(false);
@@ -245,7 +249,14 @@ export function ChatTab() {
         ])
       : false;
 
-    invalidate(identityId, { includeHistory: !appended });
+    // Reopen the direct-append path first: the turn is already in the history
+    // cache above, so anything arriving from here on lands in the right place.
+    turnInFlight.current = false;
+    // Results that landed mid-turn were skipped to protect ordering; refetch so
+    // the server's insertion order decides where they sit.
+    const missedWatcherResults = consumeWatcherBacklog();
+
+    invalidate(identityId, { includeHistory: !appended || missedWatcherResults });
 
     // Auto-speak the finished response when the user has that turned on and voice
     // is configured. Reads live settings so toggling mid-stream is respected.

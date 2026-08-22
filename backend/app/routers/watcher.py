@@ -4,6 +4,9 @@ watcher.py router — Watcher-Agent management API.
 Routes:
   GET    /watcher/status                    — list all running watcher identities
   GET    /watcher/tools                     — list registered tool names
+  GET    /watcher/agents                    — tools annotated builtin/generated
+  DELETE /watcher/agents/{name}             — delete a spawned agent
+  GET    /watcher/debug                     — live vs persisted tool registry (admin)
   GET    /watcher/log                       — global invocation log (admin)
   GET    /identities/{id}/watcher/status    — is watcher running for this identity?
   GET    /identities/{id}/watcher/stream    — SSE push stream (instant result delivery)
@@ -17,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -87,6 +91,101 @@ def watcher_global_status(_: dict = Depends(_require_admin)) -> dict:
 def list_tools(_: dict = Depends(_require_any)) -> dict:
     """Return the names of all registered watcher tools."""
     return {"tools": WatcherTools.list_tools()}
+
+
+@router.get("/watcher/debug")
+def watcher_debug(_: dict = Depends(_require_admin)) -> dict:
+    """Debug: show which tools are live in this process vs persisted in Mongo."""
+    import falcon.watcher_generated as Generated
+
+    stored = Generated.list_all()
+    live = WatcherTools.list_tools()
+    return {
+        "pid": os.getpid(),
+        "tools": live,
+        "generated_stored": [
+            {"name": d["name"], "revision": d.get("revision"), "created_at": d.get("created_at")}
+            for d in stored
+        ],
+        # Non-empty means this process has drifted from the store; dispatch will
+        # heal each entry on first use, but it signals a startup-load failure.
+        "generated_missing_from_registry": [d["name"] for d in stored if d["name"] not in live],
+    }
+
+
+@router.get("/watcher/agents")
+def list_agents(auth: dict = Depends(_require_any)) -> dict:
+    """Every registered tool, annotated so the UI can show and manage them.
+
+    ``kind`` is "generated" for tools spawned at runtime (they live in the
+    ``watcher_generated_tools`` collection and carry their source) and "builtin"
+    for those defined in watcher_tools.py. Only generated tools are deletable —
+    a built-in would simply reappear on the next process start.
+    """
+    import falcon.watcher_generated as Generated
+
+    stored = {d["name"]: d for d in Generated.list_all()}
+    agents = []
+    for name in WatcherTools.list_tools():
+        doc = stored.get(name)
+        handler = WatcherTools._REGISTRY.get(name)
+        # Built-ins document themselves in their docstring; generated tools
+        # carry the spawn prompt that produced them.
+        summary = (doc or {}).get("context") or ""
+        if not summary and handler and handler.__doc__:
+            summary = handler.__doc__.strip().split("\n", 1)[0]
+        agents.append({
+            "name": name,
+            "kind": "generated" if doc else "builtin",
+            "deletable": bool(doc) and name not in WatcherTools.PROTECTED_TOOLS,
+            "summary": summary,
+            "code": (doc or {}).get("code"),
+            "revision": (doc or {}).get("revision"),
+            "created_at": (doc or {}).get("created_at"),
+        })
+
+    return {"agents": agents, "count": len(agents)}
+
+
+@router.delete("/watcher/agents/{name}")
+def delete_agent(name: str, auth: dict = Depends(_require_any)) -> dict:
+    """Delete a spawned agent: its stored code, its registration, its persona entry.
+
+    Removal has to be all three or the system contradicts itself — a tool left in
+    the persona but missing from the registry would be advertised to the model
+    and then fail on dispatch.
+    """
+    import falcon.watcher_generated as Generated
+
+    key = name.lower().strip()
+
+    if key in WatcherTools.PROTECTED_TOOLS:
+        raise HTTPException(
+            400,
+            f"'{key}' is protected and cannot be deleted — it is the only way to create new agents.",
+        )
+
+    if Generated.get(key) is None:
+        # Distinguish "built-in, so not yours to delete" from "no such tool",
+        # because the two need very different responses from the user.
+        if key in WatcherTools.list_tools():
+            raise HTTPException(400, f"'{key}' is a built-in tool and cannot be deleted.")
+        raise HTTPException(404, f"No agent named '{key}'.")
+
+    if not Generated.delete(key):
+        raise HTTPException(500, f"Failed to delete '{key}' from the agent store.")
+
+    # Rebuild the persona from what is now registered, so the model stops being
+    # told about a tool that no longer exists. Called with no arguments, this
+    # regenerates the whole AVAILABLE COMMANDS block from the live registry.
+    Watcher.refresh_watcher_persona()
+
+    remaining = WatcherTools.list_tools()
+    logger.info(
+        "watcher: agent %r deleted by %r — %d tools remain",
+        key, auth.get("username") or auth.get("identity_id"), len(remaining),
+    )
+    return {"deleted": key, "tools": remaining}
 
 
 @router.get("/watcher/log")

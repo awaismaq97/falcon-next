@@ -239,3 +239,108 @@ else:
 # default for that case so the judge never runs without instructions.
 # ---------------------------------------------------------------------------
 judge_system_prompt: str = str(_cfg.get("judge_system_prompt") or "").strip()
+
+# ---------------------------------------------------------------------------
+# Watcher Persona
+# A shared persona block injected for any identity that has the watcher
+# enabled. Managed dynamically: spawn_agent rewrites the `watcher_persona`
+# key in config.yaml via `update_watcher_persona()` then calls
+# `reload_watcher_persona()` to make the change live without a server restart.
+# ---------------------------------------------------------------------------
+watcher_persona: str = str(_cfg.get("watcher_persona") or "").strip()
+
+# mtime of config.yaml as of the last persona load, so a rewrite performed by
+# another process (or another uvicorn worker) is picked up without a restart.
+try:
+    _persona_mtime: float = os.path.getmtime(_config_path)
+except OSError:
+    _persona_mtime = 0.0
+
+
+def reload_watcher_persona_if_changed() -> str:
+    """Reload the persona only when config.yaml has been rewritten since last read.
+
+    spawn_agent persists the rebuilt persona to config.yaml, but only the process
+    that ran it updates its own module global. Every other process would keep
+    serving a persona that omits the new tool. A stat() per call is cheap enough
+    to run on the chat path and closes that gap.
+    """
+    global _persona_mtime
+    try:
+        mtime = os.path.getmtime(_config_path)
+    except OSError:
+        return watcher_persona
+    if mtime != _persona_mtime:
+        _persona_mtime = mtime
+        return reload_watcher_persona()
+    return watcher_persona
+
+
+def reload_watcher_persona() -> str:
+    """Re-read config.yaml and update the module-level `watcher_persona` string.
+
+    Called by falcon.watcher.refresh_watcher_persona() after a new tool has
+    been registered so every subsequent inference turn sees the updated tool list
+    in the watcher persona block.
+
+    Returns the freshly loaded persona string.
+    """
+    global watcher_persona, _persona_mtime
+    try:
+        with open(_config_path, "r", encoding="utf-8") as _fh:
+            _fresh = yaml.safe_load(_fh)
+        watcher_persona = str((_fresh or {}).get("watcher_persona") or "").strip()
+        try:
+            _persona_mtime = os.path.getmtime(_config_path)
+        except OSError:
+            pass
+        _logger.info("config: watcher_persona reloaded (%d chars)", len(watcher_persona))
+    except Exception as _exc:
+        _logger.error("config: reload_watcher_persona failed: %s", _exc)
+    return watcher_persona
+
+
+def update_watcher_persona(new_persona: str) -> None:
+    """Overwrite the `watcher_persona` block in config.yaml with new_persona text.
+
+    Preserves all other keys unchanged. Uses a read-modify-write on the raw YAML
+    text so comments and ordering in the file are retained as much as possible.
+    After writing, calls reload_watcher_persona() to make the change live.
+    """
+    global watcher_persona
+    try:
+        with open(_config_path, "r", encoding="utf-8") as _fh:
+            raw_yaml = _fh.read()
+
+        # Replace the watcher_persona block.  The block starts at the key and
+        # ends at the next non-indented key (or end-of-file).
+        # Strategy: use PyYAML to roundtrip-safe-dump with ruamel would be ideal
+        # but we only have PyYAML — instead do a targeted regex replace.
+        import re as _re
+
+        # Match:  watcher_persona: |  (or watcher_persona: "..." or bare scalar)
+        # followed by all indented continuation lines.
+        _PERSONA_BLOCK_RE = _re.compile(
+            r"^watcher_persona\s*:.*?(?=\n\S|\Z)",
+            _re.DOTALL | _re.MULTILINE,
+        )
+
+        # Indent the new persona text by 2 spaces (YAML literal block scalar)
+        indented = "\n".join("  " + line for line in new_persona.splitlines())
+        replacement = f"watcher_persona: |\n{indented}"
+
+        if _PERSONA_BLOCK_RE.search(raw_yaml):
+            new_raw = _PERSONA_BLOCK_RE.sub(replacement, raw_yaml)
+        else:
+            # Key doesn't exist yet — append at end
+            new_raw = raw_yaml.rstrip("\n") + f"\n\n{replacement}\n"
+
+        with open(_config_path, "w", encoding="utf-8") as _fh:
+            _fh.write(new_raw)
+
+        _logger.info("config: watcher_persona written to config.yaml (%d chars)", len(new_persona))
+        reload_watcher_persona()
+    except Exception as _exc:
+        _logger.error("config: update_watcher_persona failed: %s", _exc)
+        # Still update the in-memory value even if disk write failed
+        watcher_persona = new_persona.strip()

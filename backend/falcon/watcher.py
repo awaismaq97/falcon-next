@@ -23,19 +23,28 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
+import socket
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
 from bson import ObjectId
+from pymongo.errors import DuplicateKeyError
 
 from falcon.db import get_db
 
 logger = logging.getLogger("falcon.watcher")
 
 POLL_INTERVAL_S: float = 1.0
+
+# Identifies this process in watcher_processed.claimed_by, so it is obvious from
+# the data which instance executed a given marker when several are pointed at
+# the same database.
+_INSTANCE_ID = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:6]}"
 
 _RESULT_OPEN  = "[AGENT RESULT]"
 _RESULT_CLOSE = "[/AGENT RESULT]"
@@ -53,6 +62,11 @@ _push_lock = threading.Lock()
 
 
 def _register_queue(identity_id: str, q: asyncio.Queue) -> None:
+    # Results may be produced by a different instance than the one this client
+    # is connected to, so delivery rides on a change stream rather than the
+    # local bus alone. Started on first subscriber: an instance nobody is
+    # browsing does not need the cursor.
+    _ensure_broadcaster()
     with _push_lock:
         _push_bus.setdefault(identity_id, set()).add(q)
 
@@ -78,6 +92,119 @@ def _push_to_subscribers(identity_id: str, message: dict) -> None:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# ---------------------------------------------------------------------------
+# Result broadcaster — cross-instance SSE delivery
+# ---------------------------------------------------------------------------
+# The push bus above is per-process. When more than one Falcon instance points
+# at the same database (a local dev server plus a deployed one, or a single app
+# scaled past one instance) the instance that executes a marker is usually not
+# the one holding the browser's SSE connection, so an in-process push reaches
+# nobody and the result only surfaces on the next history refetch.
+#
+# A change stream on the messages collection fixes that: every instance watches
+# for injected results and fans them out to whichever subscribers it happens to
+# hold. Delivery no longer depends on which instance did the work.
+#
+# Change streams need a replica set. Atlas always is one; a standalone mongod
+# used for local dev is not, so we fall back to the direct in-process push there
+# (correct for a single instance, which is the only thing a standalone supports
+# anyway).
+
+_broadcaster: Optional["ResultBroadcaster"] = None
+_broadcaster_lock = threading.Lock()
+
+
+def _change_streams_available() -> bool:
+    """True if the deployment can serve a change stream (i.e. is a replica set)."""
+    try:
+        from falcon.db import supports_transactions
+        return supports_transactions()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("watcher: change-stream probe failed, assuming none: %s", exc)
+        return False
+
+
+class ResultBroadcaster(threading.Thread):
+    """Tails the messages collection and fans injected results out to SSE queues."""
+
+    # Only watcher-injected inserts matter; ordinary chat messages are delivered
+    # by the request that created them.
+    _PIPELINE = [{"$match": {"operationType": "insert", "fullDocument._watcher": True}}]
+
+    def __init__(self) -> None:
+        super().__init__(name="falcon-watcher-broadcaster", daemon=True)
+        self._stop_event = threading.Event()
+        self._stream = None
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        # Close the cursor so the blocking iteration returns promptly.
+        stream = self._stream
+        if stream is not None:
+            try:
+                stream.close()
+            except Exception:  # noqa: BLE001 — best effort
+                pass
+
+    def run(self) -> None:
+        logger.info("watcher: result broadcaster started")
+        backoff = 1.0
+        while not self._stop_event.is_set():
+            try:
+                with get_db()["messages"].watch(self._PIPELINE) as stream:
+                    self._stream = stream
+                    backoff = 1.0  # connected — reset the retry delay
+                    for change in stream:
+                        if self._stop_event.is_set():
+                            break
+                        self._fan_out(change.get("fullDocument") or {})
+            except Exception as exc:  # noqa: BLE001
+                if self._stop_event.is_set():
+                    break
+                logger.error(
+                    "watcher: broadcaster stream error (retrying in %.0fs): %s", backoff, exc,
+                )
+                self._stop_event.wait(backoff)
+                backoff = min(backoff * 2, 30.0)
+            finally:
+                self._stream = None
+        logger.info("watcher: result broadcaster stopped")
+
+    def _fan_out(self, doc: dict) -> None:
+        identity_id = doc.get("identity_id")
+        if not identity_id:
+            return
+        _push_to_subscribers(identity_id, {
+            "type": "watcher_result",
+            "timestamp": doc.get("timestamp", ""),
+            "content": doc.get("content", ""),
+        })
+
+
+def _ensure_broadcaster() -> None:
+    """Start the broadcaster once per process. No-op without change streams."""
+    global _broadcaster
+    with _broadcaster_lock:
+        if _broadcaster is not None and _broadcaster.is_alive():
+            return
+        if not _change_streams_available():
+            logger.info(
+                "watcher: no change-stream support, falling back to in-process result push",
+            )
+            return
+        _broadcaster = ResultBroadcaster()
+        _broadcaster.start()
+
+
+def stop_result_broadcaster() -> None:
+    """Stop the broadcaster. Called on FastAPI shutdown."""
+    global _broadcaster
+    with _broadcaster_lock:
+        b, _broadcaster = _broadcaster, None
+    if b:
+        b.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -152,18 +279,32 @@ def format_result(result_text: str) -> str:
 # Idempotency helpers
 # ---------------------------------------------------------------------------
 
-def _mark_processed(msg_id: ObjectId, identity_id: str) -> None:
-    """Record that this message has been processed (idempotency guard)."""
-    db = get_db()
-    db["watcher_processed"].update_one(
-        {"msg_id": msg_id},
-        {"$setOnInsert": {
+def _claim(msg_id: ObjectId, identity_id: str) -> bool:
+    """Atomically claim a message for execution. True if this process won it.
+
+    ``watcher_processed`` has a unique index on ``msg_id``, so a plain insert is
+    the claim: exactly one caller can succeed and everyone else gets a duplicate
+    key error. This has to be atomic rather than the old check-then-insert,
+    because more than one Falcon instance can be pointed at the same database
+    (a local dev server and a deployed one, say) and both poll the same
+    ``messages`` collection. Under check-then-act both would execute the same
+    marker — sending the tweet twice, spawning the agent twice.
+    """
+    try:
+        get_db()["watcher_processed"].insert_one({
             "msg_id": msg_id,
             "identity_id": identity_id,
             "processed_at": _utc_now_iso(),
-        }},
-        upsert=True,
-    )
+            "claimed_by": _INSTANCE_ID,
+        })
+        return True
+    except DuplicateKeyError:
+        return False
+    except Exception as exc:  # noqa: BLE001
+        # Never execute a command we could not record — a failed claim on a
+        # transient DB error is safer than a double send.
+        logger.error("watcher: claim failed for msg %s: %s", msg_id, exc)
+        return False
 
 
 def _is_processed(msg_id: ObjectId) -> bool:
@@ -214,7 +355,13 @@ def _inject_result(identity_id: str, result_text: str) -> None:
     }
     db["messages"].insert_one(doc)
 
-    # Push immediately to every connected SSE client — no polling needed.
+    # With a broadcaster running, the insert above is itself the delivery signal
+    # and every instance fans it out to its own subscribers — pushing here too
+    # would deliver the result twice to clients attached to this instance.
+    # Without change-stream support the local push is the only delivery path.
+    if _broadcaster is not None and _broadcaster.is_alive():
+        return
+
     _push_to_subscribers(identity_id, {
         "type": "watcher_result",
         "timestamp": ts,
@@ -243,13 +390,18 @@ def _process_message(identity_id: str, msg_doc: dict) -> None:
     if not markers:
         return
 
+    # Claim BEFORE execution: this both prevents a crash mid-run from causing a
+    # retry and guarantees only one instance runs the markers in this message.
+    if not _claim(msg_id, identity_id):
+        logger.info(
+            "watcher: msg %s already claimed by another instance, skipping", msg_id,
+        )
+        return
+
     logger.info(
         "watcher: found %d marker(s) in msg %s for identity=%r",
         len(markers), msg_id, identity_id,
     )
-
-    # Mark processed BEFORE execution so a crash mid-run doesn't cause a retry.
-    _mark_processed(msg_id, identity_id)
 
     for m in markers:
         command = m["command"]
@@ -354,8 +506,9 @@ class WatcherThread(threading.Thread):
                     "watcher: _process_message raised for identity=%r msg=%s: %s",
                     self.identity_id, msg["_id"], exc,
                 )
-                # Mark processed even on error so we don't keep retrying.
-                _mark_processed(msg["_id"], self.identity_id)
+                # The claim inside _process_message already blocks a retry; this
+                # covers a failure raised before it got that far.
+                _claim(msg["_id"], self.identity_id)
 
 
 # ---------------------------------------------------------------------------
@@ -452,3 +605,142 @@ def bootstrap_watchers() -> None:
         logger.info("watcher: bootstrapped %d watcher(s): %s", len(ids), ids)
     else:
         logger.info("watcher: no identities with watcher_enabled=True at startup")
+
+
+# ---------------------------------------------------------------------------
+# Watcher Persona — dynamic, shared across all watcher-enabled identities
+# ---------------------------------------------------------------------------
+
+def get_watcher_persona() -> str:
+    """Return the current watcher persona text from config.
+
+    Picks up a persona rewritten by another process (spawn_agent persists it to
+    config.yaml) so a newly spawned tool is advertised to the model immediately.
+    Returns empty string if not configured.
+    """
+    try:
+        import falcon.config as Config
+        return Config.reload_watcher_persona_if_changed() or ""
+    except Exception as exc:
+        logger.error("watcher: get_watcher_persona failed: %s", exc)
+        return ""
+
+
+def refresh_watcher_persona(new_tool_name: str = "", new_tool_context: str = "") -> None:
+    """Rebuild and persist the watcher persona after a new tool is registered.
+
+    Uses a fixed base template — no AI generation. The base text is always
+    preserved verbatim; only the AVAILABLE COMMANDS section is rebuilt from
+    the live tool registry so newly spawned tools appear automatically.
+
+    Built-in tools have hand-written descriptions. Dynamically spawned tools
+    get a generic entry derived from their name and the spawn context.
+    """
+    try:
+        import falcon.config as Config
+        import falcon.watcher_tools as WatcherTools
+
+        # ------------------------------------------------------------------
+        # Hand-written descriptions for the core built-in tools.
+        # Any tool NOT listed here gets a generic entry.
+        # ------------------------------------------------------------------
+        _BUILTIN_DESCRIPTIONS: dict[str, dict] = {
+            "echo": {
+                "use_when": "user asks you to relay or confirm a piece of text.",
+                "payload": "the text to echo.",
+                "example": "This message was relayed successfully.",
+            },
+            "ping": {
+                "use_when": "user asks if the watcher is alive or wants a timestamp.",
+                "payload": "none.",
+                "example": "",
+            },
+            "http_get": {
+                "use_when": "user asks you to fetch a URL, check a page, or retrieve API data.",
+                "payload": "the full URL (must start with http:// or https://).",
+                "example": "https://httpbin.org/get",
+            },
+            "post_tweet": {
+                "use_when": "user asks you to post a tweet or message to X/Twitter.",
+                "payload": "tweet text (max 280 characters).",
+                "example": "Hello from Falcon — posted automatically.",
+            },
+            "fetch_replies": {
+                "use_when": "user asks you to get replies or mentions for a tweet.",
+                "payload": "tweet URL or tweet ID.",
+                "example": "https://twitter.com/user/status/1234567890",
+            },
+            "spawn_agent": {
+                "use_when": "you need to create a new tool/agent that doesn't exist yet.",
+                "payload": "free-text description of the capability you need.",
+                "example": "Create a tool that sends an email via SMTP.",
+            },
+        }
+
+        tool_list = WatcherTools.list_tools()
+
+        # Spawn contexts for dynamically generated tools, so their persona entry
+        # says what they are actually for instead of a generic placeholder.
+        import falcon.watcher_generated as Generated
+        generated_contexts = {
+            d["name"]: (d.get("context") or "") for d in Generated.list_all()
+        }
+        if new_tool_name and new_tool_context:
+            generated_contexts[new_tool_name] = new_tool_context
+
+        # Build the numbered AVAILABLE COMMANDS block
+        command_blocks = []
+        for i, tool_name in enumerate(tool_list, start=1):
+            info = _BUILTIN_DESCRIPTIONS.get(tool_name)
+            if info:
+                use_when = info["use_when"]
+                payload_desc = info["payload"]
+                example = info["example"]
+            else:
+                # Dynamically spawned tool — describe it from its spawn context.
+                spawn_context = generated_contexts.get(tool_name, "").strip()
+                if spawn_context:
+                    use_when = spawn_context[:120].rstrip() + ("..." if len(spawn_context) > 120 else "")
+                else:
+                    use_when = f"user asks you to use the {tool_name} capability."
+                payload_desc = "tool-specific input (see tool documentation)."
+                example = f"<your {tool_name} input here>"
+
+            block = f"{i}. {tool_name}\nUse when: {use_when}\nPayload: {payload_desc}"
+            if example:
+                block += f"\nExample:\n[AGENT: {tool_name}]\n{example}\n[/AGENT]"
+            else:
+                block += f"\nExample:\n[AGENT: {tool_name}][/AGENT]"
+            command_blocks.append(block)
+
+        commands_text = "\n\n".join(command_blocks)
+
+        new_persona = (
+            "You also have access to an external watcher agent that executes commands on your behalf. "
+            "When a task requires a tool, emit a command block in your response using this exact format:\n\n"
+            "[AGENT: <command>]\n"
+            "<payload>\n"
+            "[/AGENT]\n\n"
+            "The opening tag names the command. Everything between the opening and closing [/AGENT] tag "
+            "is the payload passed to the tool. The closing tag is required — it tells the agent exactly "
+            "where your command ends and your normal response continues.\n\n"
+            "AVAILABLE COMMANDS:\n\n"
+            f"{commands_text}\n\n"
+            "RULES:\n"
+            "- The [/AGENT] closing tag is mandatory. Never omit it.\n"
+            "- Place the entire block on its own lines, separate from your explanation text.\n"
+            "- You may write normal text before and after the block.\n"
+            "- For multiple commands, emit multiple blocks in sequence.\n"
+            "- Do not describe what the command will do inside the block — just the payload.\n"
+            "- This tools are just dummy for initial testing. "
+            "If nothing is given but only command is required, use any dummy url etc."
+        )
+
+        Config.update_watcher_persona(new_persona)
+        logger.info(
+            "watcher: persona rebuilt (%d chars) with %d tools after registering %r",
+            len(new_persona), len(tool_list), new_tool_name,
+        )
+
+    except Exception as exc:
+        logger.error("watcher: refresh_watcher_persona failed: %s", exc, exc_info=True)

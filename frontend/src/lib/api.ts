@@ -346,4 +346,14 @@ export const api = {
       { method: "POST", body: JSON.stringify({ enabled }), headers: getAuthHeaders() },
     ),
   watcherTools: () => req<{ tools: string[] }>("/api/watcher/tools"),
+  watcherAgents: () =>
+    req<{ agents: import("./types").WatcherAgent[]; count: number }>(
+      "/api/watcher/agents",
+      { headers: getAuthHeaders() },
+    ),
+  deleteWatcherAgent: (name: string) =>
+    req<{ deleted: string; tools: string[] }>(
+      `/api/watcher/agents/${encodeURIComponent(name)}`,
+      { method: "DELETE", headers: getAuthHeaders() },
+    ),
 };

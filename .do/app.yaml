@@ -45,6 +45,14 @@ services:
         scope: RUN_TIME
       - key: MONGODB_URI
         scope: RUN_TIME
+      # Production database, pinned explicitly. Local development sets
+      # MONGODB_DB=falcon_dev so a developer's machine never shares the
+      # messages collection with this service — the watcher polls that
+      # collection autonomously, so two instances on one database race to
+      # execute each other's agent commands.
+      - key: MONGODB_DB
+        scope: RUN_TIME
+        value: "falcon"
       - key: NASA_API_KEY
         scope: RUN_TIME
       - key: WEATHERAPI_KEY

@@ -3,11 +3,18 @@
 import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { Download, Trash2, ScrollText, Bot, ChevronDown, ChevronRight } from "lucide-react";
+import { Download, Trash2, ScrollText, Bot, ChevronDown, ChevronRight, Lock } from "lucide-react";
 import { api } from "@/lib/api";
-import { useHistory, useTraceIndex, useWatcherStatus, useWatcherLog, qk } from "@/lib/queries";
+import {
+  useHistory,
+  useTraceIndex,
+  useWatcherStatus,
+  useWatcherLog,
+  useWatcherAgents,
+  qk,
+} from "@/lib/queries";
 import { useSettings } from "@/lib/store";
-import type { Message, TraceStep, WatcherLogEntry } from "@/lib/types";
+import type { Message, TraceStep, WatcherLogEntry, WatcherAgent } from "@/lib/types";
 import { Button, Textarea, Badge, Spinner } from "@/components/ui/primitives";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { JsonView } from "@/components/JsonView";
@@ -70,10 +77,161 @@ function WatcherLogEntry({ entry }: { entry: WatcherLogEntry }) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Agent manager — view and delete the tools the watcher can dispatch
+// ---------------------------------------------------------------------------
+
+function AgentRow({ agent, onDeleted }: { agent: WatcherAgent; onDeleted: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  async function remove() {
+    if (
+      !confirm(
+        `Delete agent "${agent.name}"?\n\nThis removes its stored code, unregisters it from the watcher, ` +
+          `and drops it from the persona so the model stops being told it exists. This cannot be undone.`,
+      )
+    )
+      return;
+    setBusy(true);
+    try {
+      await api.deleteWatcherAgent(agent.name);
+      toast.success(`Agent "${agent.name}" deleted.`);
+      onDeleted();
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-2.5">
+      <div className="flex items-center gap-2">
+        <Badge color={agent.kind === "generated" ? "blue" : "gray"}>{agent.kind}</Badge>
+        <span className="font-mono text-[0.8rem] font-medium text-[var(--color-fg)]">
+          {agent.name}
+        </span>
+        {agent.revision != null && agent.revision > 1 && (
+          <span className="font-mono text-[0.68rem] text-[var(--color-fg-subtle)]">
+            rev {agent.revision}
+          </span>
+        )}
+        <span className="ml-auto flex items-center gap-2">
+          {agent.created_at && (
+            <span className="font-mono text-[0.68rem] text-[var(--color-fg-subtle)]">
+              {fmtTime(agent.created_at)}
+            </span>
+          )}
+          {agent.deletable ? (
+            <Button size="sm" variant="ghost" onClick={remove} disabled={busy}>
+              {busy ? <Spinner /> : <Trash2 className="h-3.5 w-3.5" />}
+            </Button>
+          ) : (
+            // Built-ins live in source and spawn_agent is the only way to make
+            // new tools — neither can be removed from here.
+            <span
+              title={
+                agent.name === "spawn_agent"
+                  ? "Protected — spawn_agent is the only way to create new agents."
+                  : "Built-in tool — defined in code, not deletable."
+              }
+              className="text-[var(--color-fg-subtle)]"
+            >
+              <Lock className="h-3.5 w-3.5" />
+            </span>
+          )}
+          <button
+            onClick={() => setOpen((o) => !o)}
+            className="rounded p-0.5 text-[var(--color-fg-subtle)] hover:text-[var(--color-fg)]"
+          >
+            {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+          </button>
+        </span>
+      </div>
+
+      {open && (
+        <div className="mt-2 space-y-1.5 border-t border-[var(--color-border)] pt-2">
+          {agent.summary && (
+            <div>
+              <div className="mb-0.5 text-[0.68rem] font-semibold uppercase tracking-wide text-[var(--color-fg-subtle)]">
+                {agent.kind === "generated" ? "Spawn prompt" : "Description"}
+              </div>
+              <p className="text-[0.75rem] text-[var(--color-fg)]">{agent.summary}</p>
+            </div>
+          )}
+          {agent.code && (
+            <div>
+              <div className="mb-0.5 text-[0.68rem] font-semibold uppercase tracking-wide text-[var(--color-fg-subtle)]">
+                Source
+              </div>
+              <pre className="max-h-72 overflow-auto whitespace-pre rounded bg-[var(--color-surface-2)] px-2 py-1.5 font-mono text-[0.72rem] text-[var(--color-fg)]">
+                {agent.code}
+              </pre>
+            </div>
+          )}
+          {!agent.code && agent.kind === "builtin" && (
+            <p className="text-[0.72rem] text-[var(--color-fg-subtle)]">
+              Defined in <span className="font-mono">watcher_tools.py</span>.
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AgentManagerDialog({
+  open,
+  onOpenChange,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+}) {
+  const qc = useQueryClient();
+  // Only fetch while the dialog is actually open.
+  const { data, isLoading } = useWatcherAgents(open);
+  const agents = data?.agents ?? [];
+  const generated = agents.filter((a) => a.kind === "generated").length;
+
+  function refresh() {
+    qc.invalidateQueries({ queryKey: qk.watcherAgents() });
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent title="Watcher agents">
+        {isLoading ? (
+          <div className="flex items-center gap-2 py-6 text-[var(--color-fg-subtle)]">
+            <Spinner /> Loading agents…
+          </div>
+        ) : agents.length === 0 ? (
+          <p className="py-4 text-[0.82rem] text-[var(--color-fg-subtle)]">
+            No agents registered.
+          </p>
+        ) : (
+          <>
+            <p className="mb-3 text-[0.75rem] text-[var(--color-fg-subtle)]">
+              {agents.length} registered · {generated} spawned at runtime. Deleting a spawned agent
+              removes its code and its persona entry, so the model stops being told it exists.
+            </p>
+            <div className="space-y-1.5">
+              {agents.map((a) => (
+                <AgentRow key={a.name} agent={a} onDeleted={refresh} />
+              ))}
+            </div>
+          </>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function WatcherLogPanel({ identityId, hideHeader }: { identityId: string; hideHeader?: boolean }) {
   const qc = useQueryClient();
   const { data: statusData } = useWatcherStatus(identityId);
   const { data: logData, isLoading } = useWatcherLog(identityId, 50);
+  const [agentsOpen, setAgentsOpen] = useState(false);
 
   async function clearLog() {
     if (!confirm("Clear watcher log for this identity?")) return;
@@ -97,6 +255,9 @@ function WatcherLogPanel({ identityId, hideHeader }: { identityId: string; hideH
           <h3 className="text-[0.9rem] font-semibold">Watcher Agent Log</h3>
           <WatcherStatusDot identityId={identityId} />
           <div className="ml-auto flex items-center gap-2">
+            <Button size="sm" variant="ghost" onClick={() => setAgentsOpen(true)}>
+              <Bot className="h-3.5 w-3.5" /> Agents
+            </Button>
             {records.length > 0 && (
               <Button size="sm" variant="ghost" onClick={clearLog}>
                 <Trash2 className="h-3.5 w-3.5" /> Clear
@@ -114,19 +275,27 @@ function WatcherLogPanel({ identityId, hideHeader }: { identityId: string; hideH
         </div>
       )}
 
-      {/* Actions row when inside drawer (hideHeader=true) */}
-      {hideHeader && records.length > 0 && (
+      {/* Actions row when inside drawer (hideHeader=true). Always rendered so
+          Agents stays reachable even before the first invocation is logged. */}
+      {hideHeader && (
         <div className="flex items-center justify-end gap-2 border-b border-[var(--color-border)] px-4 py-1">
-          <Button size="sm" variant="ghost" onClick={clearLog}>
-            <Trash2 className="h-3.5 w-3.5" /> Clear
+          <Button size="sm" variant="ghost" onClick={() => setAgentsOpen(true)}>
+            <Bot className="h-3.5 w-3.5" /> Agents
           </Button>
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={() => downloadJSON(`falcon_watcher_log_${identityId}.json`, records)}
-          >
-            <Download className="h-3.5 w-3.5" /> Export
-          </Button>
+          {records.length > 0 && (
+            <>
+              <Button size="sm" variant="ghost" onClick={clearLog}>
+                <Trash2 className="h-3.5 w-3.5" /> Clear
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => downloadJSON(`falcon_watcher_log_${identityId}.json`, records)}
+              >
+                <Download className="h-3.5 w-3.5" /> Export
+              </Button>
+            </>
+          )}
         </div>
       )}
 
@@ -148,6 +317,8 @@ function WatcherLogPanel({ identityId, hideHeader }: { identityId: string; hideH
           ))}
         </div>
       )}
+
+      <AgentManagerDialog open={agentsOpen} onOpenChange={setAgentsOpen} />
     </div>
   );
 }
