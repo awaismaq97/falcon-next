@@ -375,7 +375,7 @@ def _inject_result(identity_id: str, result_text: str) -> None:
 
 def _process_message(identity_id: str, msg_doc: dict) -> None:
     """Scan one assistant message, execute any markers, inject results."""
-    from falcon.watcher_tools import dispatch
+    from falcon.watcher_tools import dispatch, set_current_identity
 
     content = msg_doc.get("content", "") or ""
     msg_id = msg_doc["_id"]
@@ -402,6 +402,11 @@ def _process_message(identity_id: str, msg_doc: dict) -> None:
         "watcher: found %d marker(s) in msg %s for identity=%r",
         len(markers), msg_id, identity_id,
     )
+
+    # Tools that own per-user state (research jobs) need to know whose
+    # conversation they are serving; without this they would scope to nobody and
+    # every identity would see every other identity's work.
+    set_current_identity(identity_id)
 
     for m in markers:
         command = m["command"]
@@ -674,6 +679,21 @@ def refresh_watcher_persona(new_tool_name: str = "", new_tool_context: str = "")
                 "use_when": "you need to create a new tool/agent that doesn't exist yet.",
                 "payload": "free-text description of the capability you need.",
                 "example": "Create a tool that sends an email via SMTP.",
+            },
+            "research": {
+                "use_when": (
+                    "a question needs real investigation rather than a single page fetch — "
+                    "comparing sources, gathering current facts, or anything you cannot answer "
+                    "from memory. Also use it to check on work already running: 'status' for "
+                    "progress, 'result' for the finished report, 'list' for recent jobs, "
+                    "'cancel <id>' to stop one. The job runs in the background for minutes and "
+                    "survives restarts, so start it, tell the user its id, and carry on — the "
+                    "report is posted into the conversation by itself when ready, even days later."
+                ),
+                "payload": (
+                    "the research question, or one of: status [id] / result [id] / list / cancel <id>."
+                ),
+                "example": "What are the current EU rules on AI model transparency, and when do they take effect?",
             },
         }
 

@@ -17,6 +17,9 @@ Built-in tools (v1 — dummy/safe):
   http_get     — fetches a URL and returns the first 2 000 chars of the body
   post_tweet   — stub (NOT CONFIGURED until Twitter credentials are wired)
   fetch_replies— stub (NOT CONFIGURED)
+  research     — long-running search → browse → summarize. Starts a background
+                 job whose state lives in MongoDB, so it survives restarts and
+                 can be collected days later. See falcon/research.py.
 
 Dynamic tools (v2):
   spawn_agent  — uses GPT-4o-mini to generate a new stub tool, stores its source
@@ -30,6 +33,7 @@ registry drift).
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import re
@@ -40,6 +44,27 @@ logger = logging.getLogger(__name__)
 
 # Registry: command_name → handler(payload: str) -> str
 _REGISTRY: dict[str, Callable[[str], str]] = {}
+
+# Which identity's conversation triggered the tool currently executing.
+#
+# Handlers take only a payload, so a tool that owns per-user state (research
+# jobs) would otherwise have no way to scope it — and in a multi-user app,
+# unscoped state means one user's work is visible to everyone. The watcher sets
+# this immediately before dispatch; a contextvar rather than a global because
+# each watcher thread must see its own value.
+_current_identity: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "falcon_watcher_identity", default=""
+)
+
+
+def set_current_identity(identity_id: str) -> None:
+    """Record whose conversation is being served, for the duration of a dispatch."""
+    _current_identity.set(identity_id or "")
+
+
+def current_identity() -> str:
+    """The identity the running tool is acting for, or "" when unknown."""
+    return _current_identity.get()
 
 # Tools that may never be removed through the management API, on top of the
 # blanket rule that built-ins are not deletable. spawn_agent is the only way to
@@ -143,6 +168,114 @@ def _fetch_replies(payload: str) -> str:
     return (
         "[NOT CONFIGURED] fetch_replies requires Twitter API credentials. "
         "Set TWITTER_API_KEY etc. to enable."
+    )
+
+
+# ---------------------------------------------------------------------------
+# research — long-running search / browse / summarize
+# ---------------------------------------------------------------------------
+
+# Sub-commands are recognised only on an exact match, so an actual research
+# question is never mistaken for one. "status of the UK grid in 2026" starts a
+# job; "status a1b2c3" inspects one.
+_RESEARCH_CMD = re.compile(r"^(status|result|cancel)(?:\s+([0-9a-fA-F]{4,12}))?$", re.I)
+
+
+def _fmt_job_line(job: dict) -> str:
+    bits = [f"`{job['job_id']}`", job["status"]]
+    if job.get("rounds_done") is not None:
+        bits.append(f"round {job['rounds_done']}/{job.get('max_rounds', '?')}")
+    return f"{' · '.join(bits)} — {job.get('question', '')[:90]}"
+
+
+@register_tool("research")
+def _research(payload: str) -> str:
+    """Run a long-running research job: search the web, read pages, and summarize.
+
+    Payload forms:
+        <question>        start a new job, returns its id immediately
+        status [id]       progress of a job (most recent if no id)
+        result [id]       the finished report (most recent if no id)
+        list              recent jobs
+        cancel <id>       stop a job
+
+    Jobs run in the background for minutes and persist in MongoDB, so they
+    survive restarts and can be collected days later. A finished job also posts
+    its report into the conversation on its own.
+    """
+    import falcon.research as Research
+
+    text = (payload or "").strip()
+    identity = current_identity()
+
+    if not text:
+        return (
+            "[ERROR] research needs a question. Example:\n"
+            "[AGENT: research]\nWhat are the current EU rules on AI model transparency?\n[/AGENT]"
+        )
+
+    if text.lower() == "list":
+        jobs = Research.list_jobs(identity, limit=10)
+        if not jobs:
+            return "No research jobs yet."
+        return "Recent research jobs:\n" + "\n".join(f"- {_fmt_job_line(j)}" for j in jobs)
+
+    m = _RESEARCH_CMD.match(text)
+    if m:
+        action = m.group(1).lower()
+        job_id = (m.group(2) or "").lower()
+
+        if not job_id:
+            recent = Research.list_jobs(identity, limit=1)
+            if not recent:
+                return "No research jobs yet."
+            job_id = recent[0]["job_id"]
+
+        if action == "cancel":
+            ok = Research.cancel_job(job_id, identity)
+            return f"Research job `{job_id}` cancelled." if ok else (
+                f"[ERROR] No running job `{job_id}` to cancel."
+            )
+
+        job = Research.get_job(job_id, identity)
+        if not job:
+            return f"[ERROR] No research job `{job_id}`."
+
+        if action == "status":
+            lines = [
+                f"Research job `{job['job_id']}` — **{job['status']}**",
+                f"Question: {job['question']}",
+                f"Rounds: {job['rounds_done']}/{job['max_rounds']} · "
+                f"{len(job.get('findings') or [])} findings from {len(job.get('sources') or [])} sources",
+                f"Search provider: {job.get('provider', 'unknown')}",
+                f"Started: {job['created_at']}",
+            ]
+            if job.get("error"):
+                lines.append(f"Error: {job['error']}")
+            if job["status"] == "done":
+                lines.append(f"Report ready — use [AGENT: research] result {job['job_id']} [/AGENT]")
+            return "\n".join(lines)
+
+        # action == "result"
+        if job["status"] != "done":
+            return (
+                f"Research job `{job['job_id']}` is **{job['status']}** "
+                f"({job['rounds_done']}/{job['max_rounds']} rounds). No report yet."
+            )
+        return f"Research report — `{job['job_id']}`\nQuestion: {job['question']}\n\n{job['report']}"
+
+    # Anything else is a new question.
+    try:
+        job = Research.start_job(text, identity_id=identity)
+    except ValueError as exc:
+        return f"[ERROR] {exc}"
+
+    return (
+        f"Research job `{job['job_id']}` started — searching via {job['provider']}, "
+        f"up to {job['max_rounds']} rounds.\n"
+        f"Question: {job['question']}\n\n"
+        f"This runs in the background and survives restarts. The report will be posted here when "
+        f"it is ready; you can also check with [AGENT: research] status {job['job_id']} [/AGENT]."
     )
 
 
@@ -295,31 +428,37 @@ def _update_watcher_persona_for_new_tool(tool_name: str, context: str) -> None:
 # Public tool registration
 # ---------------------------------------------------------------------------
 
-@register_tool("spawn_agent")
-def _spawn_agent(payload: str) -> str:
-    """Dynamically generate and register a new watcher tool from a natural-language description.
+def spawn_agent(context: str, name: str = "") -> dict:
+    """Generate, register and persist a new watcher tool.
 
-    Payload: free-form text describing the desired capability
-    (e.g. "create a mailbox for the user using IMAP credentials").
+    The single implementation behind both creation paths: the watcher's
+    ``[AGENT: spawn_agent …]`` marker and the REST endpoint the UI form posts
+    to. Keeping them on one code path is what guarantees an agent created from
+    the UI is identical to one created from chat — same validation, same
+    persistence, same persona update.
 
-    Returns JSON: {"status": "ok"|"error", "agent_id": "<tool_name>", "message": "..."}
+    ``name`` lets a caller that already knows what the tool should be called
+    skip the AI name-derivation step. Left empty, the name is inferred from
+    ``context`` exactly as the chat path has always done.
+
+    Returns ``{"status": "ok"|"error", "agent_id": str, "message": str}``.
     """
     global _spawn_in_progress
 
     if _spawn_in_progress:
-        return json.dumps({
+        return {
             "status": "error",
             "agent_id": "",
             "message": "Another spawn_agent call is already in progress. Try again shortly.",
-        })
+        }
 
-    context = payload.strip()
+    context = (context or "").strip()
     if not context:
-        return json.dumps({
+        return {
             "status": "error",
             "agent_id": "",
-            "message": "spawn_agent requires a non-empty payload describing the desired capability.",
-        })
+            "message": "spawn_agent requires a non-empty description of the desired capability.",
+        }
 
     _spawn_in_progress = True
     try:
@@ -330,17 +469,22 @@ def _spawn_agent(payload: str) -> str:
         # regenerate a tool that already exists in the store.
         Generated.ensure_loaded()
 
-        # 1. Derive a clean tool name from the context via AI
-        tool_name = _tool_name_from_context(context)
-        logger.info("spawn_agent: derived tool name %r for context: %s", tool_name, context[:80])
+        # 1. Name it. A name supplied by the caller is authoritative — someone
+        #    typed it deliberately — so it is only sanitised, never handed to
+        #    the model to second-guess.
+        if (name or "").strip():
+            tool_name = _sanitize_tool_name(name)
+        else:
+            tool_name = _tool_name_from_context(context)
+        logger.info("spawn_agent: tool name %r for context: %s", tool_name, context[:80])
 
         # 2. Check if a tool with this name already exists
         if tool_name in _REGISTRY:
-            return json.dumps({
+            return {
                 "status": "error",
                 "agent_id": tool_name,
                 "message": f"A tool named '{tool_name}' already exists in the registry.",
-            })
+            }
 
         # 3. Generate stub code via AI
         func_code = _generate_tool_code(tool_name, context)
@@ -351,24 +495,24 @@ def _spawn_agent(payload: str) -> str:
         problem = Generated.compile_check(tool_name, func_code)
         if problem:
             logger.error("spawn_agent: generated code for %r does not compile: %s", tool_name, problem)
-            return json.dumps({
+            return {
                 "status": "error",
                 "agent_id": tool_name,
                 "message": f"The generated code for '{tool_name}' does not compile ({problem}). Nothing was saved.",
-            })
+            }
 
         # 5. Load it into this process's registry first. If the function does not
         #    actually register (e.g. the model named it differently) we bail out
         #    without persisting a tool that can never be dispatched.
         if not Generated.exec_into_registry(tool_name, func_code):
-            return json.dumps({
+            return {
                 "status": "error",
                 "agent_id": tool_name,
                 "message": (
                     f"Tool '{tool_name}' compiled but failed to register. "
                     "Check the server logs for details. Nothing was saved."
                 ),
-            })
+            }
 
         # 6. Persist so every other process (and every restart) picks it up.
         Generated.save(tool_name, func_code, context)
@@ -377,7 +521,7 @@ def _spawn_agent(payload: str) -> str:
         _update_watcher_persona_for_new_tool(tool_name, context)
 
         logger.info("spawn_agent: successfully registered tool %r", tool_name)
-        return json.dumps({
+        return {
             "status": "ok",
             "agent_id": tool_name,
             "message": (
@@ -385,15 +529,27 @@ def _spawn_agent(payload: str) -> str:
                 f"Use [AGENT: {tool_name}]...[/AGENT] to invoke it. "
                 "Note: this is a stub — wire up real credentials/logic to make it functional."
             ),
-        })
+        }
 
     except Exception as exc:
         logger.error("spawn_agent: unexpected error: %s", exc, exc_info=True)
-        return json.dumps({
+        return {
             "status": "error",
             "agent_id": "",
             "message": f"spawn_agent failed with an unexpected error: {exc}",
-        })
+        }
     finally:
         _spawn_in_progress = False
+
+
+@register_tool("spawn_agent")
+def _spawn_agent(payload: str) -> str:
+    """Dynamically generate and register a new watcher tool from a natural-language description.
+
+    Payload: free-form text describing the desired capability
+    (e.g. "create a mailbox for the user using IMAP credentials").
+
+    Returns JSON: {"status": "ok"|"error", "agent_id": "<tool_name>", "message": "..."}
+    """
+    return json.dumps(spawn_agent(payload))
 

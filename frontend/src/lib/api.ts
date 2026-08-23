@@ -351,6 +351,39 @@ export const api = {
       "/api/watcher/agents",
       { headers: getAuthHeaders() },
     ),
+  // ── Research jobs ─────────────────────────────────────────────────────────
+  researchJobs: (id: string, limit = 20) =>
+    req<{ jobs: import("./types").ResearchJobSummary[]; count: number }>(
+      `/api/identities/${encodeURIComponent(id)}/research?limit=${limit}`,
+      { headers: getAuthHeaders() },
+    ),
+  researchJob: (id: string, jobId: string) =>
+    req<import("./types").ResearchJob>(
+      `/api/identities/${encodeURIComponent(id)}/research/${encodeURIComponent(jobId)}`,
+      { headers: getAuthHeaders() },
+    ),
+  cancelResearchJob: (id: string, jobId: string) =>
+    req<{ cancelled: string }>(
+      `/api/identities/${encodeURIComponent(id)}/research/${encodeURIComponent(jobId)}/cancel`,
+      { method: "POST", headers: getAuthHeaders() },
+    ),
+  // The only way research data leaves the database — nothing expires it.
+  deleteResearchJob: (id: string, jobId: string) =>
+    req<{ deleted: string }>(
+      `/api/identities/${encodeURIComponent(id)}/research/${encodeURIComponent(jobId)}`,
+      { method: "DELETE", headers: getAuthHeaders() },
+    ),
+
+  // Creation runs two model calls server-side (name derivation, then code
+  // generation), so it gets a longer leash than the 30s default — a timeout
+  // here would abandon a request that is still going to register an agent.
+  createWatcherAgent: (body: import("./types").WatcherAgentCreate) =>
+    req<import("./types").WatcherAgentCreated>("/api/watcher/agents", {
+      method: "POST",
+      headers: getAuthHeaders(),
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(90_000),
+    }),
   deleteWatcherAgent: (name: string) =>
     req<{ deleted: string; tools: string[] }>(
       `/api/watcher/agents/${encodeURIComponent(name)}`,

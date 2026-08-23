@@ -73,12 +73,41 @@ async def lifespan(app: FastAPI):
         except Exception as gen_exc:
             logger.warning("Generated watcher tools not loaded: %s", gen_exc)
 
+        # Rebuild the watcher persona from the live registry on every boot. It is
+        # persisted to config.yaml, which is ephemeral on a container filesystem,
+        # so without this a redeploy would leave the model reading a stale
+        # command list. It is also how a newly added built-in tool reaches the
+        # model without waiting for the next spawn or delete to trigger a rebuild.
+        try:
+            from falcon.watcher import refresh_watcher_persona
+            refresh_watcher_persona()
+        except Exception as persona_exc:
+            logger.warning("Watcher persona refresh skipped: %s", persona_exc)
+
         # Start watcher threads for any identities with watcher_enabled=True.
         try:
             from falcon.watcher import bootstrap_watchers
             bootstrap_watchers()
         except Exception as watcher_exc:
             logger.warning("Watcher bootstrap skipped: %s", watcher_exc)
+
+        # Start the research worker. Jobs left unfinished by a previous process
+        # are resumed automatically — their heartbeat has gone stale, which is
+        # what makes them claimable again.
+        try:
+            from falcon.research import bootstrap as bootstrap_research
+            bootstrap_research()
+        except Exception as research_exc:
+            logger.warning("Research worker not started: %s", research_exc)
+
+        # Periodic snapshot of the live database into a sibling database on the
+        # same cluster (falcon → falcon_backup). Due-ness is read from Mongo, so
+        # restarts and redeploys neither reset the schedule nor re-run it.
+        try:
+            from falcon.backup import start_scheduler as start_backup_scheduler
+            start_backup_scheduler()
+        except Exception as backup_exc:
+            logger.warning("Backup scheduler not started: %s", backup_exc)
 
     except Exception as exc:  # noqa: BLE001
         logger.warning("MongoDB warmup skipped (will retry lazily): %s", exc)
@@ -88,6 +117,16 @@ async def lifespan(app: FastAPI):
         from falcon.watcher import stop_all_watchers, stop_result_broadcaster
         stop_all_watchers()
         stop_result_broadcaster()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from falcon.research import stop_worker as stop_research_worker
+        stop_research_worker()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from falcon.backup import stop_scheduler as stop_backup_scheduler
+        stop_backup_scheduler()
     except Exception:  # noqa: BLE001
         pass
     try:

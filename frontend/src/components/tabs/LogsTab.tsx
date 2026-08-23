@@ -3,7 +3,18 @@
 import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { Download, Trash2, ScrollText, Bot, ChevronDown, ChevronRight, Lock } from "lucide-react";
+import {
+  Download,
+  Trash2,
+  ScrollText,
+  Bot,
+  ChevronDown,
+  ChevronRight,
+  Lock,
+  Plus,
+  FileText,
+  Ban,
+} from "lucide-react";
 import { api } from "@/lib/api";
 import {
   useHistory,
@@ -11,13 +22,22 @@ import {
   useWatcherStatus,
   useWatcherLog,
   useWatcherAgents,
+  useResearchJobs,
+  useResearchJob,
   qk,
 } from "@/lib/queries";
 import { useSettings } from "@/lib/store";
-import type { Message, TraceStep, WatcherLogEntry, WatcherAgent } from "@/lib/types";
-import { Button, Textarea, Badge, Spinner } from "@/components/ui/primitives";
+import type {
+  Message,
+  TraceStep,
+  WatcherLogEntry,
+  WatcherAgent,
+  ResearchJobSummary,
+} from "@/lib/types";
+import { Button, Input, Textarea, Badge, Spinner, Field } from "@/components/ui/primitives";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { JsonView } from "@/components/JsonView";
+import { Markdown } from "@/components/Markdown";
 import { cn, downloadJSON, fmtTime } from "@/lib/utils";
 import { toast } from "@/components/ui/toast";
 
@@ -181,6 +201,122 @@ function AgentRow({ agent, onDeleted }: { agent: WatcherAgent; onDeleted: () => 
   );
 }
 
+/** Mirror of the backend's `_sanitize_tool_name`.
+ *
+ * Duplicated deliberately: it lets the form show the name that will actually be
+ * registered ("Fetch Weather" → fetch_weather) while the user types, instead of
+ * surprising them with a renamed agent after submitting. The backend still
+ * sanitises independently — this is a preview, not a substitute.
+ */
+function toToolName(raw: string): string {
+  return raw
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_]/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function NewAgentForm({
+  existing,
+  onCreated,
+  onCancel,
+}: {
+  existing: string[];
+  onCreated: () => void;
+  onCancel: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [purpose, setPurpose] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const typed = name.trim();
+  // Empty name is valid — the backend derives one from the purpose.
+  const toolName = typed ? toToolName(typed) || "unnamed_tool" : "";
+  const clash = toolName !== "" && existing.includes(toolName);
+  const canSubmit = purpose.trim().length > 0 && !clash && !busy;
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!canSubmit) return;
+    setBusy(true);
+    try {
+      const res = await api.createWatcherAgent({ purpose: purpose.trim(), name: toolName });
+      toast.success(`Agent "${res.agent.name}" created and added to the persona.`);
+      setBusy(false);
+      onCreated();
+    } catch (err) {
+      toast.error((err as Error).message);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form
+      onSubmit={submit}
+      className="mb-3 space-y-2.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3"
+    >
+      <Field label="Name — optional, derived from the purpose if left blank">
+        <Input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="fetch_weather"
+          disabled={busy}
+          autoFocus
+        />
+      </Field>
+      {typed !== "" && (
+        <p
+          className={cn(
+            "text-[0.7rem]",
+            clash ? "text-[var(--color-red)]" : "text-[var(--color-fg-subtle)]",
+          )}
+        >
+          {clash ? (
+            <>
+              <span className="font-mono">{toolName}</span> already exists — pick another name.
+            </>
+          ) : (
+            <>
+              Registers as <span className="font-mono">{toolName}</span>
+            </>
+          )}
+        </p>
+      )}
+
+      <Field label="Purpose — what should this agent do?">
+        <Textarea
+          rows={3}
+          value={purpose}
+          onChange={(e) => setPurpose(e.target.value)}
+          placeholder="Fetch the current weather for a city name and return a one-line summary."
+          disabled={busy}
+        />
+      </Field>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <Button size="sm" type="submit" disabled={!canSubmit}>
+          {busy ? (
+            <>
+              <Spinner /> Creating…
+            </>
+          ) : (
+            "Create agent"
+          )}
+        </Button>
+        <Button size="sm" variant="ghost" type="button" onClick={onCancel} disabled={busy}>
+          Cancel
+        </Button>
+        <span className="text-[0.7rem] text-[var(--color-fg-subtle)]">
+          {busy
+            ? "Writing the code and rebuilding the persona — this takes a few seconds."
+            : "Created as a stub: registered and described to the model, but returns [NOT CONFIGURED] until its logic is wired up."}
+        </span>
+      </div>
+    </form>
+  );
+}
+
 function AgentManagerDialog({
   open,
   onOpenChange,
@@ -191,6 +327,7 @@ function AgentManagerDialog({
   const qc = useQueryClient();
   // Only fetch while the dialog is actually open.
   const { data, isLoading } = useWatcherAgents(open);
+  const [creating, setCreating] = useState(false);
   const agents = data?.agents ?? [];
   const generated = agents.filter((a) => a.kind === "generated").length;
 
@@ -198,26 +335,260 @@ function AgentManagerDialog({
     qc.invalidateQueries({ queryKey: qk.watcherAgents() });
   }
 
+  // Drop a half-filled form when the dialog closes, so it does not reappear
+  // mid-edit the next time the panel is opened.
+  useEffect(() => {
+    if (!open) setCreating(false);
+  }, [open]);
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent title="Watcher agents">
+        <div className="mb-3 flex items-start justify-between gap-3">
+          <p className="text-[0.75rem] text-[var(--color-fg-subtle)]">
+            {isLoading ? "Loading…" : `${agents.length} registered · ${generated} spawned at runtime.`}{" "}
+            A new agent is registered and written into the watcher persona immediately, so the
+            model can use it without a restart. Deleting one removes both.
+          </p>
+          {!creating && (
+            <Button size="sm" className="shrink-0" onClick={() => setCreating(true)}>
+              <Plus className="h-3.5 w-3.5" /> New agent
+            </Button>
+          )}
+        </div>
+
+        {creating && (
+          <NewAgentForm
+            existing={agents.map((a) => a.name)}
+            onCancel={() => setCreating(false)}
+            onCreated={() => {
+              setCreating(false);
+              refresh();
+            }}
+          />
+        )}
+
         {isLoading ? (
           <div className="flex items-center gap-2 py-6 text-[var(--color-fg-subtle)]">
             <Spinner /> Loading agents…
           </div>
         ) : agents.length === 0 ? (
+          <p className="py-4 text-[0.82rem] text-[var(--color-fg-subtle)]">No agents registered.</p>
+        ) : (
+          <div className="space-y-1.5">
+            {agents.map((a) => (
+              <AgentRow key={a.name} agent={a} onDeleted={refresh} />
+            ))}
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Research reports — output of the `research` agent
+// ---------------------------------------------------------------------------
+
+const RESEARCH_STATUS_COLOR: Record<string, "green" | "blue" | "red" | "gray"> = {
+  done: "green",
+  running: "blue",
+  queued: "gray",
+  failed: "red",
+  cancelled: "gray",
+};
+
+function ResearchJobRow({
+  identityId,
+  job,
+  onChanged,
+}: {
+  identityId: string;
+  job: ResearchJobSummary;
+  onChanged: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  // The report body is only worth fetching once someone opens the row.
+  const { data: full, isLoading } = useResearchJob(identityId, open ? job.job_id : null);
+  const live = job.status === "queued" || job.status === "running";
+
+  async function cancel() {
+    if (!confirm(`Stop research job "${job.job_id}"?\n\nFindings gathered so far are kept.`)) return;
+    setBusy(true);
+    try {
+      await api.cancelResearchJob(identityId, job.job_id);
+      toast.success(`Job ${job.job_id} cancelled.`);
+      onChanged();
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove() {
+    if (
+      !confirm(
+        `Permanently delete research job "${job.job_id}"?\n\n` +
+          `"${job.question}"\n\n` +
+          `This erases its report, findings and sources from the database. ` +
+          `Nothing else deletes research data, so this cannot be undone.`,
+      )
+    )
+      return;
+    setBusy(true);
+    try {
+      await api.deleteResearchJob(identityId, job.job_id);
+      toast.success(`Job ${job.job_id} deleted.`);
+      onChanged();
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-2.5">
+      <div className="flex items-center gap-2">
+        <Badge color={RESEARCH_STATUS_COLOR[job.status] ?? "gray"}>{job.status}</Badge>
+        <span className="font-mono text-[0.72rem] text-[var(--color-fg-subtle)]">{job.job_id}</span>
+        <span className="min-w-0 flex-1 truncate text-[0.8rem] text-[var(--color-fg)]" title={job.question}>
+          {job.question}
+        </span>
+        <span className="flex shrink-0 items-center gap-2">
+          <span className="font-mono text-[0.68rem] text-[var(--color-fg-subtle)]">
+            {job.rounds_done}/{job.max_rounds} · {job.sources.length} src
+          </span>
+          {/* Stop is for work in progress; delete is for the record afterwards.
+              Keeping them distinct means a click meant to stop a job can never
+              destroy the findings it already gathered. */}
+          {live ? (
+            <Button size="sm" variant="ghost" onClick={cancel} disabled={busy} title="Stop this job">
+              {busy ? <Spinner /> : <Ban className="h-3.5 w-3.5" />}
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={remove}
+              disabled={busy}
+              title="Delete this job and its report permanently"
+            >
+              {busy ? <Spinner /> : <Trash2 className="h-3.5 w-3.5" />}
+            </Button>
+          )}
+          <button
+            onClick={() => setOpen((o) => !o)}
+            className="rounded p-0.5 text-[var(--color-fg-subtle)] hover:text-[var(--color-fg)]"
+          >
+            {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+          </button>
+        </span>
+      </div>
+
+      {open && (
+        <div className="mt-2 border-t border-[var(--color-border)] pt-2">
+          {isLoading ? (
+            <div className="flex items-center gap-2 py-3 text-[0.78rem] text-[var(--color-fg-subtle)]">
+              <Spinner /> Loading report…
+            </div>
+          ) : !full ? (
+            <p className="py-2 text-[0.75rem] text-[var(--color-fg-subtle)]">Could not load this job.</p>
+          ) : (
+            <div className="space-y-2.5">
+              {full.report ? (
+                <Markdown>{full.report}</Markdown>
+              ) : (
+                <p className="text-[0.75rem] text-[var(--color-fg-subtle)]">
+                  {live
+                    ? "Still working — the report is written after the final round."
+                    : "No report was produced."}
+                </p>
+              )}
+
+              {full.error && (
+                <p className="text-[0.75rem] text-[var(--color-red)]">Error: {full.error}</p>
+              )}
+
+              {full.findings.length > 0 && (
+                <details>
+                  <summary className="cursor-pointer text-[0.68rem] font-semibold uppercase tracking-wide text-[var(--color-fg-subtle)]">
+                    {full.findings.length} findings
+                  </summary>
+                  <ul className="mt-1.5 space-y-1">
+                    {full.findings.map((f, i) => (
+                      <li key={i} className="text-[0.75rem] text-[var(--color-fg)]">
+                        <span className="text-[var(--color-fg-subtle)]">r{f.round}</span> {f.note}{" "}
+                        <a
+                          href={f.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="break-all text-[0.7rem] text-[var(--color-blue)] underline"
+                        >
+                          {f.url}
+                        </a>
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              )}
+
+              <p className="text-[0.68rem] text-[var(--color-fg-subtle)]">
+                {full.provider} · started {fmtTime(full.created_at)}
+                {full.finished_at ? ` · finished ${fmtTime(full.finished_at)}` : ""}
+                {full.queries_run.length > 0 && ` · searched: ${full.queries_run.join(" | ")}`}
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ResearchReportsDialog({
+  identityId,
+  open,
+  onOpenChange,
+}: {
+  identityId: string;
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+}) {
+  const qc = useQueryClient();
+  const { data, isLoading } = useResearchJobs(identityId, open);
+  const jobs = data?.jobs ?? [];
+  const running = jobs.filter((j) => j.status === "running" || j.status === "queued").length;
+
+  function refresh() {
+    qc.invalidateQueries({ queryKey: qk.researchJobs(identityId) });
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent title="Research reports">
+        {isLoading ? (
+          <div className="flex items-center gap-2 py-6 text-[var(--color-fg-subtle)]">
+            <Spinner /> Loading reports…
+          </div>
+        ) : jobs.length === 0 ? (
           <p className="py-4 text-[0.82rem] text-[var(--color-fg-subtle)]">
-            No agents registered.
+            No research jobs yet. Ask the assistant to research something — it runs in the
+            background and the report appears here when it is done.
           </p>
         ) : (
           <>
             <p className="mb-3 text-[0.75rem] text-[var(--color-fg-subtle)]">
-              {agents.length} registered · {generated} spawned at runtime. Deleting a spawned agent
-              removes its code and its persona entry, so the model stops being told it exists.
+              {jobs.length} job{jobs.length === 1 ? "" : "s"}
+              {running > 0 && ` · ${running} still running`}. Jobs survive restarts and are kept
+              indefinitely — nothing expires them, so a report from months ago is still here until
+              you delete it.
             </p>
             <div className="space-y-1.5">
-              {agents.map((a) => (
-                <AgentRow key={a.name} agent={a} onDeleted={refresh} />
+              {jobs.map((j) => (
+                <ResearchJobRow key={j.job_id} identityId={identityId} job={j} onChanged={refresh} />
               ))}
             </div>
           </>
@@ -232,6 +603,7 @@ function WatcherLogPanel({ identityId, hideHeader }: { identityId: string; hideH
   const { data: statusData } = useWatcherStatus(identityId);
   const { data: logData, isLoading } = useWatcherLog(identityId, 50);
   const [agentsOpen, setAgentsOpen] = useState(false);
+  const [reportsOpen, setReportsOpen] = useState(false);
 
   async function clearLog() {
     if (!confirm("Clear watcher log for this identity?")) return;
@@ -255,6 +627,9 @@ function WatcherLogPanel({ identityId, hideHeader }: { identityId: string; hideH
           <h3 className="text-[0.9rem] font-semibold">Watcher Agent Log</h3>
           <WatcherStatusDot identityId={identityId} />
           <div className="ml-auto flex items-center gap-2">
+            <Button size="sm" variant="ghost" onClick={() => setReportsOpen(true)}>
+              <FileText className="h-3.5 w-3.5" /> Reports
+            </Button>
             <Button size="sm" variant="ghost" onClick={() => setAgentsOpen(true)}>
               <Bot className="h-3.5 w-3.5" /> Agents
             </Button>
@@ -279,6 +654,9 @@ function WatcherLogPanel({ identityId, hideHeader }: { identityId: string; hideH
           Agents stays reachable even before the first invocation is logged. */}
       {hideHeader && (
         <div className="flex items-center justify-end gap-2 border-b border-[var(--color-border)] px-4 py-1">
+          <Button size="sm" variant="ghost" onClick={() => setReportsOpen(true)}>
+            <FileText className="h-3.5 w-3.5" /> Reports
+          </Button>
           <Button size="sm" variant="ghost" onClick={() => setAgentsOpen(true)}>
             <Bot className="h-3.5 w-3.5" /> Agents
           </Button>
@@ -319,6 +697,11 @@ function WatcherLogPanel({ identityId, hideHeader }: { identityId: string; hideH
       )}
 
       <AgentManagerDialog open={agentsOpen} onOpenChange={setAgentsOpen} />
+      <ResearchReportsDialog
+        identityId={identityId}
+        open={reportsOpen}
+        onOpenChange={setReportsOpen}
+      />
     </div>
   );
 }

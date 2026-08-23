@@ -34,6 +34,8 @@ export const qk = {
   watcherStatus: (id: string) => ["watcher-status", id] as const,
   watcherLog: (id: string) => ["watcher-log", id] as const,
   watcherAgents: () => ["watcher-agents"] as const,
+  researchJobs: (id: string) => ["research-jobs", id] as const,
+  researchJob: (id: string, jobId: string) => ["research-job", id, jobId] as const,
 };
 
 export const useConfig = () => useQuery({ queryKey: qk.config, queryFn: api.getConfig, staleTime: Infinity });
@@ -177,6 +179,27 @@ export const useWatcherAgents = (enabled = true) =>
     queryFn: () => api.watcherAgents(),
     enabled,
     staleTime: 15_000,
+  });
+
+/** Research jobs for one identity. Polls while the reports dialog is open,
+ *  since a running job's round count changes underneath it. */
+export const useResearchJobs = (id: string, enabled = true) =>
+  useQuery({
+    queryKey: qk.researchJobs(id),
+    queryFn: () => api.researchJobs(id),
+    enabled: enabled && !!id,
+    staleTime: 5_000,
+    refetchInterval: enabled ? 10_000 : false,
+  });
+
+/** One job in full. Fetched only when a report is actually opened — the
+ *  report body is far too large to pull for every row in the list. */
+export const useResearchJob = (id: string, jobId: string | null) =>
+  useQuery({
+    queryKey: qk.researchJob(id, jobId ?? ""),
+    queryFn: () => api.researchJob(id, jobId as string),
+    enabled: !!id && !!jobId,
+    staleTime: 30_000,
   });
 
 /**

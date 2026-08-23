@@ -311,7 +311,15 @@ watcher_persona: |
   Hello from Falcon — posted automatically.
   [/AGENT]
   
-  7. spawn_agent
+  7. research
+  Use when: a question needs real investigation rather than a single page fetch — comparing sources, gathering current facts, or anything you cannot answer from memory. Also use it to check on work already running: 'status' for progress, 'result' for the finished report, 'list' for recent jobs, 'cancel <id>' to stop one. The job runs in the background for minutes and survives restarts, so start it, tell the user its id, and carry on — the report is posted into the conversation by itself when ready, even days later.
+  Payload: the research question, or one of: status [id] / result [id] / list / cancel <id>.
+  Example:
+  [AGENT: research]
+  What are the current EU rules on AI model transparency, and when do they take effect?
+  [/AGENT]
+  
+  8. spawn_agent
   Use when: you need to create a new tool/agent that doesn't exist yet.
   Payload: free-text description of the capability you need.
   Example:

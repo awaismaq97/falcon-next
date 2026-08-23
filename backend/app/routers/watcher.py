@@ -5,6 +5,7 @@ Routes:
   GET    /watcher/status                    — list all running watcher identities
   GET    /watcher/tools                     — list registered tool names
   GET    /watcher/agents                    — tools annotated builtin/generated
+  POST   /watcher/agents                    — create an agent (name + purpose)
   DELETE /watcher/agents/{name}             — delete a spawned agent
   GET    /watcher/debug                     — live vs persisted tool registry (admin)
   GET    /watcher/log                       — global invocation log (admin)
@@ -12,6 +13,10 @@ Routes:
   GET    /identities/{id}/watcher/stream    — SSE push stream (instant result delivery)
   GET    /identities/{id}/watcher/log       — invocation log for one identity
   DELETE /identities/{id}/watcher/log       — clear log for one identity
+  GET    /identities/{id}/research          — research jobs (summaries)
+  GET    /identities/{id}/research/{job_id} — one job, with findings + report
+  POST   /identities/{id}/research/{job_id}/cancel — stop a running job
+  DELETE /identities/{id}/research/{job_id} — permanently delete a job
 
   Admin-only (require_admin from admin router):
   POST   /admin/users/{user_id}/watcher     — enable/disable watcher for a portal user
@@ -72,6 +77,17 @@ def _require_admin(creds: HTTPAuthorizationCredentials = Depends(_bearer)) -> di
 
 class WatcherToggleRequest(BaseModel):
     enabled: bool
+
+
+class AgentCreateRequest(BaseModel):
+    """Body for POST /watcher/agents — the UI's "add agent" form.
+
+    ``name`` is optional: left blank, the name is derived from ``purpose`` by
+    the same model call the chat path uses, so the form works with only a
+    description.
+    """
+    purpose: str
+    name: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -145,6 +161,57 @@ def list_agents(auth: dict = Depends(_require_any)) -> dict:
         })
 
     return {"agents": agents, "count": len(agents)}
+
+
+@router.post("/watcher/agents", status_code=201)
+def create_agent(body: AgentCreateRequest, auth: dict = Depends(_require_any)) -> dict:
+    """Create a new agent from a name and a description of what it should do.
+
+    The REST equivalent of telling the assistant to spawn one. Both call
+    ``WatcherTools.spawn_agent``, so an agent created here is indistinguishable
+    from one created in chat: same code generation, same compile check, same
+    registration, and the same persona rebuild — which is what makes the new
+    agent immediately visible to the model rather than only after a restart.
+
+    Runs in FastAPI's threadpool (a plain ``def``), so the two blocking model
+    calls inside do not stall the event loop.
+    """
+    import falcon.watcher_generated as Generated
+
+    purpose = body.purpose.strip()
+    if not purpose:
+        raise HTTPException(400, "Describe what the agent should do — the purpose cannot be empty.")
+
+    result = WatcherTools.spawn_agent(purpose, name=body.name)
+
+    if result.get("status") != "ok":
+        message = result.get("message") or "Agent creation failed."
+        # A name clash is the one failure the caller can fix by editing the form
+        # and retrying, so it is worth distinguishing from a generation failure.
+        raise HTTPException(409 if "already exists" in message else 400, message)
+
+    created = result["agent_id"]
+    doc = Generated.get(created) or {}
+
+    logger.info(
+        "watcher: agent %r created via API by %r",
+        created, auth.get("username") or auth.get("identity_id"),
+    )
+
+    # Same shape as a row from GET /watcher/agents, so the UI can drop it
+    # straight into its existing list without a second round trip.
+    return {
+        "agent": {
+            "name": created,
+            "kind": "generated",
+            "deletable": created not in WatcherTools.PROTECTED_TOOLS,
+            "summary": doc.get("context") or purpose,
+            "code": doc.get("code"),
+            "revision": doc.get("revision"),
+            "created_at": doc.get("created_at"),
+        },
+        "message": result.get("message", ""),
+    }
 
 
 @router.delete("/watcher/agents/{name}")
@@ -330,6 +397,84 @@ def identity_watcher_log(
     )
     records = list(cursor)
     return {"records": records, "count": len(records)}
+
+
+@router.get("/identities/{identity_id}/research")
+def list_research_jobs(
+    identity_id: str,
+    limit: int = Query(20, ge=1, le=100),
+    auth: dict = Depends(_require_any),
+) -> dict:
+    """Research jobs for one identity, newest first — summaries only.
+
+    Findings and the report are omitted here: a finished job's report can run to
+    thousands of words, and the list view only needs enough to render a row.
+    """
+    if auth.get("role") != "admin" and auth.get("identity_id") != identity_id:
+        raise HTTPException(403, "Access denied.")
+
+    import falcon.research as Research
+
+    jobs = Research.list_jobs(identity_id, limit=limit)
+    return {"jobs": jobs, "count": len(jobs)}
+
+
+@router.get("/identities/{identity_id}/research/{job_id}")
+def get_research_job(
+    identity_id: str,
+    job_id: str,
+    auth: dict = Depends(_require_any),
+) -> dict:
+    """One research job in full, including its findings and final report."""
+    if auth.get("role") != "admin" and auth.get("identity_id") != identity_id:
+        raise HTTPException(403, "Access denied.")
+
+    import falcon.research as Research
+
+    job = Research.get_job(job_id, identity_id)
+    if not job:
+        raise HTTPException(404, f"No research job '{job_id}' for this identity.")
+    return job
+
+
+@router.post("/identities/{identity_id}/research/{job_id}/cancel")
+def cancel_research_job(
+    identity_id: str,
+    job_id: str,
+    auth: dict = Depends(_require_any),
+) -> dict:
+    """Stop a queued or running job. Whatever it has gathered so far is kept."""
+    if auth.get("role") != "admin" and auth.get("identity_id") != identity_id:
+        raise HTTPException(403, "Access denied.")
+
+    import falcon.research as Research
+
+    if not Research.cancel_job(job_id, identity_id):
+        raise HTTPException(400, f"Job '{job_id}' is not running, or does not exist.")
+    logger.info("research: job %r cancelled via API by %r", job_id, auth.get("username") or identity_id)
+    return {"cancelled": job_id}
+
+
+@router.delete("/identities/{identity_id}/research/{job_id}")
+def delete_research_job(
+    identity_id: str,
+    job_id: str,
+    auth: dict = Depends(_require_any),
+) -> dict:
+    """Permanently delete one research job, including its findings and report.
+
+    The only way research data leaves the database. Nothing expires it on a
+    timer — see the retention note in falcon/research.py.
+    """
+    if auth.get("role") != "admin" and auth.get("identity_id") != identity_id:
+        raise HTTPException(403, "Access denied.")
+
+    import falcon.research as Research
+
+    if not Research.delete_job(job_id, identity_id):
+        raise HTTPException(404, f"No research job '{job_id}' for this identity.")
+    logger.info("research: job %r deleted via API by %r", job_id, auth.get("username") or identity_id)
+    return {"deleted": job_id}
 
 
 @router.delete("/identities/{identity_id}/watcher/log")

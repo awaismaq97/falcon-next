@@ -207,6 +207,11 @@ _INDEX_SPECS: list[tuple[str, object, dict]] = [
     # Correctness-critical: the claim mechanism in falcon.watcher._claim()
     ("watcher_processed", "msg_id", {"unique": True}),
     ("watcher_processed", "identity_id", {}),
+    # Research jobs. The status+created_at index backs the worker's claim query,
+    # which runs every few seconds on every instance.
+    ("research_jobs", "job_id", {"unique": True}),
+    ("research_jobs", [("status", 1), ("created_at", 1)], {}),
+    ("research_jobs", [("identity_id", 1), ("created_at", -1)], {}),
     ("watcher_settings", "identity_id", {"unique": True}),
 ]
 

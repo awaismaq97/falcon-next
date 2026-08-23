@@ -324,6 +324,46 @@ export interface WatcherAgent {
   created_at: string | null;
 }
 
+/** A research job as returned by the list endpoint — no findings or report. */
+export interface ResearchJobSummary {
+  job_id: string;
+  identity_id: string;
+  question: string;
+  status: "queued" | "running" | "done" | "failed" | "cancelled";
+  created_at: string;
+  updated_at: string;
+  finished_at: string | null;
+  rounds_done: number;
+  max_rounds: number;
+  queries_run: string[];
+  sources: string[];
+  error: string;
+  provider: string;
+}
+
+export interface ResearchFinding {
+  round: number;
+  url: string;
+  note: string;
+}
+
+/** The full job, from the detail endpoint. */
+export interface ResearchJob extends ResearchJobSummary {
+  findings: ResearchFinding[];
+  report: string;
+}
+
+/** Body for creating an agent. `name` may be blank — the backend derives one. */
+export interface WatcherAgentCreate {
+  purpose: string;
+  name?: string;
+}
+
+export interface WatcherAgentCreated {
+  agent: WatcherAgent;
+  message: string;
+}
+
 // Dual-run
 export interface DualRunSide {
   text: string;

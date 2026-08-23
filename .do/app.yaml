@@ -59,6 +59,11 @@ services:
         scope: RUN_TIME
       - key: ELEVENLABS_API_KEY
         scope: RUN_TIME
+      # Search provider for the `research` watcher agent. Unset, the agent falls
+      # back to an unauthenticated scrape that should not be relied on — set the
+      # real value in the Dashboard alongside the other secrets.
+      - key: TAVILY_API_KEY
+        scope: RUN_TIME
       - key: CORS_ORIGINS
         scope: RUN_TIME
         value: "*"
