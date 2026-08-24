@@ -24,6 +24,7 @@ import {
   useWatcherAgents,
   useResearchJobs,
   useResearchJob,
+  useWatcherPersona,
   qk,
 } from "@/lib/queries";
 import { useSettings } from "@/lib/store";
@@ -387,6 +388,159 @@ function AgentManagerDialog({
 }
 
 // ---------------------------------------------------------------------------
+// Watcher persona editor
+// ---------------------------------------------------------------------------
+
+function PersonaDialog({
+  open,
+  onOpenChange,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+}) {
+  const qc = useQueryClient();
+  const { data, isLoading, error } = useWatcherPersona(open);
+  const [preamble, setPreamble] = useState<string | null>(null);
+  const [rules, setRules] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  // Null means "not touched" so a refetch can't clobber an edit in progress.
+  const pre = preamble ?? data?.preamble ?? "";
+  const rul = rules ?? data?.rules ?? "";
+  const dirty = data != null && (pre !== data.preamble || rul !== data.rules);
+
+  useEffect(() => {
+    if (!open) {
+      setPreamble(null);
+      setRules(null);
+    }
+  }, [open]);
+
+  async function save() {
+    setBusy(true);
+    try {
+      await api.saveWatcherPersona(pre, rul);
+      toast.success("Persona saved — the model picks it up on its next turn.");
+      setPreamble(null);
+      setRules(null);
+      qc.invalidateQueries({ queryKey: qk.watcherPersona() });
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function reset() {
+    if (!confirm("Restore the shipped defaults? Your edits to the persona will be lost.")) return;
+    setBusy(true);
+    try {
+      await api.resetWatcherPersona();
+      toast.success("Persona reset to defaults.");
+      setPreamble(null);
+      setRules(null);
+      qc.invalidateQueries({ queryKey: qk.watcherPersona() });
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent title="Watcher persona">
+        {isLoading ? (
+          <div className="flex items-center gap-2 py-6 text-[var(--color-fg-subtle)]">
+            <Spinner /> Loading persona…
+          </div>
+        ) : error ? (
+          <p className="py-4 text-[0.82rem] text-[var(--color-red)]">
+            {(error as Error).message.includes("403")
+              ? "Admin access is required to view or edit the watcher persona."
+              : (error as Error).message}
+          </p>
+        ) : !data ? null : (
+          <div className="space-y-4">
+            <p className="text-[0.75rem] text-[var(--color-fg-subtle)]">
+              This is the instruction block appended to every watcher-enabled identity&apos;s system
+              prompt. Stored in MongoDB, so edits survive restarts and redeploys.
+              {data.updated_at && !data.is_default && (
+                <> Last edited by {data.updated_by} on {fmtTime(data.updated_at)}.</>
+              )}
+            </p>
+
+            <Field label="Preamble — explains the command format to the model">
+              <Textarea
+                rows={8}
+                value={pre}
+                onChange={(e) => setPreamble(e.target.value)}
+                disabled={busy}
+                className="font-mono text-[0.75rem]"
+              />
+            </Field>
+
+            <div>
+              <div className="mb-1 flex items-baseline gap-2">
+                <span className="text-[0.75rem] text-[var(--color-fg-muted)]">
+                  Available commands
+                </span>
+                <span className="text-[0.68rem] text-[var(--color-fg-subtle)]">
+                  generated from the live tool registry — not editable
+                </span>
+              </div>
+              {/* Deliberately read-only: a stored copy of this is exactly what
+                  used to go stale, advertising deleted tools or missing new ones. */}
+              <pre className="max-h-56 overflow-auto whitespace-pre-wrap rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 font-mono text-[0.72rem] text-[var(--color-fg-muted)]">
+                {data.commands}
+              </pre>
+            </div>
+
+            <Field label="Rules — appended after the command list">
+              <Textarea
+                rows={7}
+                value={rul}
+                onChange={(e) => setRules(e.target.value)}
+                disabled={busy}
+                className="font-mono text-[0.75rem]"
+              />
+            </Field>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <Button size="sm" onClick={save} disabled={!dirty || busy || !pre.trim()}>
+                {busy ? <Spinner /> : null} Save
+              </Button>
+              {dirty && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    setPreamble(null);
+                    setRules(null);
+                  }}
+                  disabled={busy}
+                >
+                  Discard changes
+                </Button>
+              )}
+              <Button
+                size="sm"
+                variant="ghost"
+                className="ml-auto"
+                onClick={reset}
+                disabled={busy || data.is_default}
+              >
+                Reset to defaults
+              </Button>
+            </div>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Research reports — output of the `research` agent
 // ---------------------------------------------------------------------------
 
@@ -604,6 +758,7 @@ function WatcherLogPanel({ identityId, hideHeader }: { identityId: string; hideH
   const { data: logData, isLoading } = useWatcherLog(identityId, 50);
   const [agentsOpen, setAgentsOpen] = useState(false);
   const [reportsOpen, setReportsOpen] = useState(false);
+  const [personaOpen, setPersonaOpen] = useState(false);
 
   async function clearLog() {
     if (!confirm("Clear watcher log for this identity?")) return;
@@ -633,6 +788,9 @@ function WatcherLogPanel({ identityId, hideHeader }: { identityId: string; hideH
             <Button size="sm" variant="ghost" onClick={() => setAgentsOpen(true)}>
               <Bot className="h-3.5 w-3.5" /> Agents
             </Button>
+            <Button size="sm" variant="ghost" onClick={() => setPersonaOpen(true)}>
+              <FileText className="h-3.5 w-3.5" /> Persona
+            </Button>
             {records.length > 0 && (
               <Button size="sm" variant="ghost" onClick={clearLog}>
                 <Trash2 className="h-3.5 w-3.5" /> Clear
@@ -659,6 +817,9 @@ function WatcherLogPanel({ identityId, hideHeader }: { identityId: string; hideH
           </Button>
           <Button size="sm" variant="ghost" onClick={() => setAgentsOpen(true)}>
             <Bot className="h-3.5 w-3.5" /> Agents
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => setPersonaOpen(true)}>
+            <FileText className="h-3.5 w-3.5" /> Persona
           </Button>
           {records.length > 0 && (
             <>
@@ -697,6 +858,7 @@ function WatcherLogPanel({ identityId, hideHeader }: { identityId: string; hideH
       )}
 
       <AgentManagerDialog open={agentsOpen} onOpenChange={setAgentsOpen} />
+      <PersonaDialog open={personaOpen} onOpenChange={setPersonaOpen} />
       <ResearchReportsDialog
         identityId={identityId}
         open={reportsOpen}

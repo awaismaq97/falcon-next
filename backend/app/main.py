@@ -73,16 +73,19 @@ async def lifespan(app: FastAPI):
         except Exception as gen_exc:
             logger.warning("Generated watcher tools not loaded: %s", gen_exc)
 
-        # Rebuild the watcher persona from the live registry on every boot. It is
-        # persisted to config.yaml, which is ephemeral on a container filesystem,
-        # so without this a redeploy would leave the model reading a stale
-        # command list. It is also how a newly added built-in tool reaches the
-        # model without waiting for the next spawn or delete to trigger a rebuild.
+        # Seed the watcher persona on a fresh database. Nothing needs rebuilding
+        # here any more: the AVAILABLE COMMANDS block is derived from the live
+        # registry each time the persona is read, and the authored halves live
+        # in Mongo — so neither a redeploy nor a newly added tool can leave the
+        # model reading a stale command list.
         try:
-            from falcon.watcher import refresh_watcher_persona
-            refresh_watcher_persona()
+            import falcon.watcher_persona as Persona
+            Persona.get_parts()
+            logger.info(
+                "Watcher persona ready (%d chars assembled)", len(Persona.assemble())
+            )
         except Exception as persona_exc:
-            logger.warning("Watcher persona refresh skipped: %s", persona_exc)
+            logger.warning("Watcher persona not initialised: %s", persona_exc)
 
         # Start watcher threads for any identities with watcher_enabled=True.
         try:

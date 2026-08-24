@@ -405,8 +405,10 @@ def _process_message(identity_id: str, msg_doc: dict) -> None:
 
     # Tools that own per-user state (research jobs) need to know whose
     # conversation they are serving; without this they would scope to nobody and
-    # every identity would see every other identity's work.
-    set_current_identity(identity_id)
+    # every identity would see every other identity's work. The message id goes
+    # with it so post_tweet can refuse a confirmation issued in the same turn
+    # that staged the tweet — the human has to have had a turn in between.
+    set_current_identity(identity_id, str(msg_id))
 
     for m in markers:
         command = m["command"]
@@ -617,150 +619,43 @@ def bootstrap_watchers() -> None:
 # ---------------------------------------------------------------------------
 
 def get_watcher_persona() -> str:
-    """Return the current watcher persona text from config.
+    """The watcher persona the model sees, assembled fresh on every call.
 
-    Picks up a persona rewritten by another process (spawn_agent persists it to
-    config.yaml) so a newly spawned tool is advertised to the model immediately.
-    Returns empty string if not configured.
+    The authored halves come from MongoDB and the AVAILABLE COMMANDS block is
+    rebuilt from the live tool registry, so a tool spawned or deleted by any
+    process — or by this one a second ago — is reflected immediately and cannot
+    go stale. Returns empty string on failure rather than raising, since a
+    missing persona degrades the turn but must not break it.
     """
     try:
-        import falcon.config as Config
-        return Config.reload_watcher_persona_if_changed() or ""
+        import falcon.watcher_persona as Persona
+
+        return Persona.assemble()
     except Exception as exc:
         logger.error("watcher: get_watcher_persona failed: %s", exc)
         return ""
 
 
 def refresh_watcher_persona(new_tool_name: str = "", new_tool_context: str = "") -> None:
-    """Rebuild and persist the watcher persona after a new tool is registered.
+    """Kept for call sites that fire after the tool registry changes.
 
-    Uses a fixed base template — no AI generation. The base text is always
-    preserved verbatim; only the AVAILABLE COMMANDS section is rebuilt from
-    the live tool registry so newly spawned tools appear automatically.
+    Nothing needs rebuilding any more: the command list is derived at read time,
+    so a newly spawned or deleted tool is already reflected the next time the
+    persona is assembled. This exists so spawn_agent, agent deletion and startup
+    keep working unchanged, and to log the transition.
 
-    Built-in tools have hand-written descriptions. Dynamically spawned tools
-    get a generic entry derived from their name and the spawn context.
+    The arguments are ignored — the new tool is already in the registry and in
+    the generated-tool store by the time this is called.
     """
     try:
-        import falcon.config as Config
         import falcon.watcher_tools as WatcherTools
 
-        # ------------------------------------------------------------------
-        # Hand-written descriptions for the core built-in tools.
-        # Any tool NOT listed here gets a generic entry.
-        # ------------------------------------------------------------------
-        _BUILTIN_DESCRIPTIONS: dict[str, dict] = {
-            "echo": {
-                "use_when": "user asks you to relay or confirm a piece of text.",
-                "payload": "the text to echo.",
-                "example": "This message was relayed successfully.",
-            },
-            "ping": {
-                "use_when": "user asks if the watcher is alive or wants a timestamp.",
-                "payload": "none.",
-                "example": "",
-            },
-            "http_get": {
-                "use_when": "user asks you to fetch a URL, check a page, or retrieve API data.",
-                "payload": "the full URL (must start with http:// or https://).",
-                "example": "https://httpbin.org/get",
-            },
-            "post_tweet": {
-                "use_when": "user asks you to post a tweet or message to X/Twitter.",
-                "payload": "tweet text (max 280 characters).",
-                "example": "Hello from Falcon — posted automatically.",
-            },
-            "fetch_replies": {
-                "use_when": "user asks you to get replies or mentions for a tweet.",
-                "payload": "tweet URL or tweet ID.",
-                "example": "https://twitter.com/user/status/1234567890",
-            },
-            "spawn_agent": {
-                "use_when": "you need to create a new tool/agent that doesn't exist yet.",
-                "payload": "free-text description of the capability you need.",
-                "example": "Create a tool that sends an email via SMTP.",
-            },
-            "research": {
-                "use_when": (
-                    "a question needs real investigation rather than a single page fetch — "
-                    "comparing sources, gathering current facts, or anything you cannot answer "
-                    "from memory. Also use it to check on work already running: 'status' for "
-                    "progress, 'result' for the finished report, 'list' for recent jobs, "
-                    "'cancel <id>' to stop one. The job runs in the background for minutes and "
-                    "survives restarts, so start it, tell the user its id, and carry on — the "
-                    "report is posted into the conversation by itself when ready, even days later."
-                ),
-                "payload": (
-                    "the research question, or one of: status [id] / result [id] / list / cancel <id>."
-                ),
-                "example": "What are the current EU rules on AI model transparency, and when do they take effect?",
-            },
-        }
-
-        tool_list = WatcherTools.list_tools()
-
-        # Spawn contexts for dynamically generated tools, so their persona entry
-        # says what they are actually for instead of a generic placeholder.
-        import falcon.watcher_generated as Generated
-        generated_contexts = {
-            d["name"]: (d.get("context") or "") for d in Generated.list_all()
-        }
-        if new_tool_name and new_tool_context:
-            generated_contexts[new_tool_name] = new_tool_context
-
-        # Build the numbered AVAILABLE COMMANDS block
-        command_blocks = []
-        for i, tool_name in enumerate(tool_list, start=1):
-            info = _BUILTIN_DESCRIPTIONS.get(tool_name)
-            if info:
-                use_when = info["use_when"]
-                payload_desc = info["payload"]
-                example = info["example"]
-            else:
-                # Dynamically spawned tool — describe it from its spawn context.
-                spawn_context = generated_contexts.get(tool_name, "").strip()
-                if spawn_context:
-                    use_when = spawn_context[:120].rstrip() + ("..." if len(spawn_context) > 120 else "")
-                else:
-                    use_when = f"user asks you to use the {tool_name} capability."
-                payload_desc = "tool-specific input (see tool documentation)."
-                example = f"<your {tool_name} input here>"
-
-            block = f"{i}. {tool_name}\nUse when: {use_when}\nPayload: {payload_desc}"
-            if example:
-                block += f"\nExample:\n[AGENT: {tool_name}]\n{example}\n[/AGENT]"
-            else:
-                block += f"\nExample:\n[AGENT: {tool_name}][/AGENT]"
-            command_blocks.append(block)
-
-        commands_text = "\n\n".join(command_blocks)
-
-        new_persona = (
-            "You also have access to an external watcher agent that executes commands on your behalf. "
-            "When a task requires a tool, emit a command block in your response using this exact format:\n\n"
-            "[AGENT: <command>]\n"
-            "<payload>\n"
-            "[/AGENT]\n\n"
-            "The opening tag names the command. Everything between the opening and closing [/AGENT] tag "
-            "is the payload passed to the tool. The closing tag is required — it tells the agent exactly "
-            "where your command ends and your normal response continues.\n\n"
-            "AVAILABLE COMMANDS:\n\n"
-            f"{commands_text}\n\n"
-            "RULES:\n"
-            "- The [/AGENT] closing tag is mandatory. Never omit it.\n"
-            "- Place the entire block on its own lines, separate from your explanation text.\n"
-            "- You may write normal text before and after the block.\n"
-            "- For multiple commands, emit multiple blocks in sequence.\n"
-            "- Do not describe what the command will do inside the block — just the payload.\n"
-            "- This tools are just dummy for initial testing. "
-            "If nothing is given but only command is required, use any dummy url etc."
-        )
-
-        Config.update_watcher_persona(new_persona)
+        tools = len(WatcherTools.list_tools())
         logger.info(
-            "watcher: persona rebuilt (%d chars) with %d tools after registering %r",
-            len(new_persona), len(tool_list), new_tool_name,
+            "watcher: persona now advertises %d tool(s)%s",
+            tools,
+            f" after registering {new_tool_name!r}" if new_tool_name else "",
         )
-
     except Exception as exc:
-        logger.error("watcher: refresh_watcher_persona failed: %s", exc, exc_info=True)
+        logger.error("watcher: refresh_watcher_persona failed: %s", exc)
+

@@ -34,6 +34,7 @@ export const qk = {
   watcherStatus: (id: string) => ["watcher-status", id] as const,
   watcherLog: (id: string) => ["watcher-log", id] as const,
   watcherAgents: () => ["watcher-agents"] as const,
+  watcherPersona: () => ["watcher-persona"] as const,
   researchJobs: (id: string) => ["research-jobs", id] as const,
   researchJob: (id: string, jobId: string) => ["research-job", id, jobId] as const,
 };
@@ -177,6 +178,15 @@ export const useWatcherAgents = (enabled = true) =>
   useQuery({
     queryKey: qk.watcherAgents(),
     queryFn: () => api.watcherAgents(),
+    enabled,
+    staleTime: 15_000,
+  });
+
+/** Watcher persona. Only fetched while the editor dialog is open; admin-only. */
+export const useWatcherPersona = (enabled = true) =>
+  useQuery({
+    queryKey: qk.watcherPersona(),
+    queryFn: () => api.watcherPersona(),
     enabled,
     staleTime: 15_000,
   });

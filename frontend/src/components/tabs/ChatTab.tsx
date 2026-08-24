@@ -362,6 +362,7 @@ export function ChatTab() {
                     contextTs={ts}
                     onOpenContext={openContext}
                     canSpeak={canSpeak}
+                    identityId={identityId}
                   />
                 );
               })}

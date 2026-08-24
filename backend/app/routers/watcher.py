@@ -4,6 +4,9 @@ watcher.py router — Watcher-Agent management API.
 Routes:
   GET    /watcher/status                    — list all running watcher identities
   GET    /watcher/tools                     — list registered tool names
+  GET    /watcher/persona                   — persona parts + derived commands (admin)
+  PUT    /watcher/persona                   — edit the authored halves (admin)
+  POST   /watcher/persona/reset             — restore shipped defaults (admin)
   GET    /watcher/agents                    — tools annotated builtin/generated
   POST   /watcher/agents                    — create an agent (name + purpose)
   DELETE /watcher/agents/{name}             — delete a spawned agent
@@ -79,6 +82,26 @@ class WatcherToggleRequest(BaseModel):
     enabled: bool
 
 
+class PersonaUpdateRequest(BaseModel):
+    """The authored halves of the watcher persona.
+
+    The AVAILABLE COMMANDS block is deliberately absent — it is derived from the
+    live tool registry on every read, so it is not editable and cannot drift.
+    """
+    preamble: str
+    rules: str = ""
+
+
+class TweetTextRequest(BaseModel):
+    """Body for confirming or editing a staged tweet.
+
+    On confirm, ``text`` is whatever the user had on screen when they pressed
+    Post — sent with the click so what they saw is exactly what publishes.
+    Omitted, the stored draft is used unchanged.
+    """
+    text: str | None = None
+
+
 class AgentCreateRequest(BaseModel):
     """Body for POST /watcher/agents — the UI's "add agent" form.
 
@@ -127,6 +150,40 @@ def watcher_debug(_: dict = Depends(_require_admin)) -> dict:
         # heal each entry on first use, but it signals a startup-load failure.
         "generated_missing_from_registry": [d["name"] for d in stored if d["name"] not in live],
     }
+
+
+@router.get("/watcher/persona")
+def get_persona(_: dict = Depends(_require_admin)) -> dict:
+    """The watcher persona: both authored halves, the derived command list, and
+    the assembled result the model actually receives."""
+    import falcon.watcher_persona as Persona
+
+    return Persona.describe()
+
+
+@router.put("/watcher/persona")
+def update_persona(body: PersonaUpdateRequest, auth: dict = Depends(_require_admin)) -> dict:
+    """Rewrite the authored halves of the persona.
+
+    Admin-only: the watcher persona is global, shared by every watcher-enabled
+    identity, so an edit here changes behaviour for all of them.
+    """
+    import falcon.watcher_persona as Persona
+
+    try:
+        Persona.save_parts(body.preamble, body.rules, updated_by=auth.get("username") or "admin")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return Persona.describe()
+
+
+@router.post("/watcher/persona/reset")
+def reset_persona(auth: dict = Depends(_require_admin)) -> dict:
+    """Restore the shipped defaults."""
+    import falcon.watcher_persona as Persona
+
+    Persona.reset_parts(updated_by=auth.get("username") or "admin")
+    return Persona.describe()
 
 
 @router.get("/watcher/agents")
@@ -397,6 +454,91 @@ def identity_watcher_log(
     )
     records = list(cursor)
     return {"records": records, "count": len(records)}
+
+
+@router.get("/identities/{identity_id}/tweets/{code}")
+def get_staged_tweet(
+    identity_id: str,
+    code: str,
+    auth: dict = Depends(_require_any),
+) -> dict:
+    """State of one staged tweet — drives the Post / Reject card in chat.
+
+    The card reads status from here rather than from the chat message, so a
+    tweet already posted or rejected still shows correctly after a reload.
+    """
+    if auth.get("role") != "admin" and auth.get("identity_id") != identity_id:
+        raise HTTPException(403, "Access denied.")
+
+    doc = WatcherTools.get_staged_tweet(code, identity_id)
+    if not doc:
+        raise HTTPException(404, f"No staged tweet '{code}'.")
+    # The limit is server-side config, so the editor's counter has to be told it
+    # rather than hardcoding 280 and disagreeing on a Premium account.
+    doc["max_chars"] = WatcherTools.tweet_char_limit()
+    return doc
+
+
+@router.patch("/identities/{identity_id}/tweets/{code}")
+def edit_staged_tweet(
+    identity_id: str,
+    code: str,
+    body: TweetTextRequest,
+    auth: dict = Depends(_require_any),
+) -> dict:
+    """Rewrite a staged tweet before it is posted.
+
+    Lets the user fix the agent's wording and keep the edit, rather than
+    rejecting the draft and asking for another one.
+    """
+    if auth.get("role") != "admin" and auth.get("identity_id") != identity_id:
+        raise HTTPException(403, "Access denied.")
+
+    ok, message = WatcherTools.edit_tweet(code, body.text or "", identity_id)
+    if not ok:
+        raise HTTPException(400, message)
+    return {"message": message}
+
+
+@router.post("/identities/{identity_id}/tweets/{code}/confirm")
+def confirm_staged_tweet(
+    identity_id: str,
+    code: str,
+    body: TweetTextRequest | None = None,
+    auth: dict = Depends(_require_any),
+) -> dict:
+    """Publish a staged tweet. The only path that posts to X.
+
+    Deliberately not exposed as a watcher tool: the model can propose a tweet
+    but cannot publish one. Reaching this requires a signed-in human, and that
+    click is the authorisation — over text the human may have rewritten.
+    """
+    if auth.get("role") != "admin" and auth.get("identity_id") != identity_id:
+        raise HTTPException(403, "Access denied.")
+
+    ok, message = WatcherTools.confirm_tweet(
+        code, identity_id, text=(body.text if body else None)
+    )
+    if not ok:
+        raise HTTPException(400, message)
+    logger.info("post_tweet: %r published by %r", code, auth.get("username") or identity_id)
+    return {"posted": True, "message": message}
+
+
+@router.post("/identities/{identity_id}/tweets/{code}/cancel")
+def cancel_staged_tweet(
+    identity_id: str,
+    code: str,
+    auth: dict = Depends(_require_any),
+) -> dict:
+    """Discard a staged tweet without posting it."""
+    if auth.get("role") != "admin" and auth.get("identity_id") != identity_id:
+        raise HTTPException(403, "Access denied.")
+
+    ok, message = WatcherTools.cancel_tweet(code, identity_id)
+    if not ok:
+        raise HTTPException(400, message)
+    return {"posted": False, "message": message}
 
 
 @router.get("/identities/{identity_id}/research")

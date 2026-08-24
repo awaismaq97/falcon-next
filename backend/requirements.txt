@@ -23,6 +23,9 @@ python-jose[cryptography]==3.3.0
 openai>=2.41,<3
 pymongo==4.7.3
 requests>=2.32,<3
+# OAuth 1.0a request signing for post_tweet — X requires user-context auth to
+# write, which an app-only bearer token cannot provide.
+requests-oauthlib>=2.0,<3
 
 # ── Document extraction (chat doc upload: PDF / Word / Excel / PowerPoint) ──
 pypdf==6.14.2

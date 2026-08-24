@@ -351,6 +351,55 @@ export const api = {
       "/api/watcher/agents",
       { headers: getAuthHeaders() },
     ),
+  // ── Watcher persona ───────────────────────────────────────────────────────
+  // Only the authored halves are writable; `commands` is derived server-side.
+  watcherPersona: () =>
+    req<import("./types").WatcherPersona>("/api/watcher/persona", {
+      headers: getAuthHeaders(),
+    }),
+  saveWatcherPersona: (preamble: string, rules: string) =>
+    req<import("./types").WatcherPersona>("/api/watcher/persona", {
+      method: "PUT",
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ preamble, rules }),
+    }),
+  resetWatcherPersona: () =>
+    req<import("./types").WatcherPersona>("/api/watcher/persona/reset", {
+      method: "POST",
+      headers: getAuthHeaders(),
+    }),
+
+  // ── Staged tweets ─────────────────────────────────────────────────────────
+  // Confirming is the only path that posts to X. It is intentionally absent
+  // from the watcher tool registry, so a model cannot reach it.
+  stagedTweet: (id: string, code: string) =>
+    req<import("./types").StagedTweet>(
+      `/api/identities/${encodeURIComponent(id)}/tweets/${encodeURIComponent(code)}`,
+      { headers: getAuthHeaders() },
+    ),
+  // `text` is what the user had on screen at the moment they pressed Post, so
+  // an unsaved edit can never diverge from what actually publishes.
+  confirmTweet: (id: string, code: string, text?: string) =>
+    req<{ posted: boolean; message: string }>(
+      `/api/identities/${encodeURIComponent(id)}/tweets/${encodeURIComponent(code)}/confirm`,
+      {
+        method: "POST",
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ text: text ?? null }),
+        signal: AbortSignal.timeout(45_000),
+      },
+    ),
+  editTweet: (id: string, code: string, text: string) =>
+    req<{ message: string }>(
+      `/api/identities/${encodeURIComponent(id)}/tweets/${encodeURIComponent(code)}`,
+      { method: "PATCH", headers: getAuthHeaders(), body: JSON.stringify({ text }) },
+    ),
+  cancelTweet: (id: string, code: string) =>
+    req<{ posted: boolean; message: string }>(
+      `/api/identities/${encodeURIComponent(id)}/tweets/${encodeURIComponent(code)}/cancel`,
+      { method: "POST", headers: getAuthHeaders() },
+    ),
+
   // ── Research jobs ─────────────────────────────────────────────────────────
   researchJobs: (id: string, limit = 20) =>
     req<{ jobs: import("./types").ResearchJobSummary[]; count: number }>(

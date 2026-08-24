@@ -1,10 +1,24 @@
 "use client";
 
-import { memo, useState } from "react";
-import { Copy, Check, SlidersHorizontal, Wrench, ChevronRight, Volume2, Square, Loader2 } from "lucide-react";
+import { memo, useEffect, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  Copy,
+  Check,
+  SlidersHorizontal,
+  Wrench,
+  ChevronRight,
+  Volume2,
+  Square,
+  Loader2,
+  Send,
+  X,
+} from "lucide-react";
 import type { Message } from "@/lib/types";
+import { api } from "@/lib/api";
 import { Markdown } from "@/components/Markdown";
-import { Badge } from "@/components/ui/primitives";
+import { Badge, Button } from "@/components/ui/primitives";
+import { toast } from "@/components/ui/toast";
 import { useTts } from "@/lib/tts";
 import { cn } from "@/lib/utils";
 
@@ -33,6 +47,198 @@ function SpeakButton({ id, text }: { id: string; text: string }) {
         <Volume2 className="h-3.5 w-3.5" />
       )}
     </button>
+  );
+}
+
+// The watcher emits [[TWEET_CONFIRM:<code>]] when it stages a tweet. Matching it
+// here is what turns the raw agent output into an approval card.
+const TWEET_CONFIRM_RE = /\[\[TWEET_CONFIRM:([0-9a-f]{4,8})\]\]/i;
+
+/** Post / Reject card for a tweet the agent has proposed.
+ *
+ * Status comes from the server rather than the chat message, so a tweet that was
+ * already posted or rejected still renders correctly after a reload — the
+ * message text is immutable history, the decision is not.
+ */
+function TweetConfirmCard({ identityId, code }: { identityId: string; code: string }) {
+  const qc = useQueryClient();
+  const [busy, setBusy] = useState<"post" | "reject" | null>(null);
+  // null until the user types — lets the server's copy stay authoritative while
+  // untouched, so a refetch doesn't clobber an edit in progress either way.
+  const [draft, setDraft] = useState<string | null>(null);
+  const { data: tweet, isLoading } = useQuery({
+    queryKey: ["staged-tweet", identityId, code],
+    queryFn: () => api.stagedTweet(identityId, code),
+    enabled: !!identityId && !!code,
+    staleTime: 5_000,
+  });
+
+  // The agent's original wording, captured once, so Revert restores what it
+  // actually proposed rather than the most recently auto-saved edit.
+  const originalRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (tweet && originalRef.current === null) originalRef.current = tweet.text;
+  }, [tweet]);
+
+  const text = draft ?? tweet?.text ?? "";
+  const limit = tweet?.max_chars ?? 280;
+  const overLimit = text.length > limit;
+  const dirty = draft !== null && tweet != null && draft.trim() !== tweet.text;
+  const changedFromOriginal =
+    originalRef.current !== null && text.trim() !== originalRef.current;
+
+  async function decide(action: "post" | "reject") {
+    setBusy(action);
+    try {
+      const res =
+        action === "post"
+          ? // Send the on-screen text with the click. Nothing has to be saved
+            // first, so there is no way to post a draft you had edited away.
+            await api.confirmTweet(identityId, code, text.trim())
+          : await api.cancelTweet(identityId, code);
+      toast.success(res.message);
+      if (action === "post") setDraft(null);
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setBusy(null);
+      qc.invalidateQueries({ queryKey: ["staged-tweet", identityId, code] });
+    }
+  }
+
+  // Persist an edit when focus leaves the box, so it survives a reload even if
+  // the user walks away without posting.
+  async function saveDraft() {
+    if (!dirty || overLimit || !text.trim()) return;
+    try {
+      await api.editTweet(identityId, code, text.trim());
+      qc.invalidateQueries({ queryKey: ["staged-tweet", identityId, code] });
+    } catch {
+      /* Non-fatal: the text still goes out with Post. */
+    }
+  }
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center gap-2 py-2 text-[0.78rem] text-[var(--color-fg-subtle)]">
+        <Loader2 className="h-3.5 w-3.5 spin" /> Loading tweet…
+      </div>
+    );
+  }
+  if (!tweet) {
+    return (
+      <p className="py-2 text-[0.78rem] text-[var(--color-fg-subtle)]">
+        This staged tweet is no longer available.
+      </p>
+    );
+  }
+
+  const posted = tweet.status === "posted";
+  const url = posted ? tweet.result.replace(/^Tweet posted:\s*/, "") : "";
+
+  return (
+    <div className="space-y-2.5">
+      {tweet.status === "pending" ? (
+        <div className="rounded-lg border border-[var(--color-border-strong)] bg-[var(--color-bg)] focus-within:border-[var(--color-fg)]">
+          <textarea
+            value={text}
+            onChange={(e) => setDraft(e.target.value)}
+            onBlur={saveDraft}
+            disabled={busy !== null}
+            rows={Math.min(8, Math.max(2, text.split("\n").length + 1))}
+            aria-label="Tweet text — edit before posting"
+            className="w-full resize-y bg-transparent px-3 pt-2.5 text-[0.88rem] leading-relaxed text-[var(--color-fg)] focus:outline-none"
+          />
+          <div className="flex items-center gap-2 px-3 pb-2">
+            <span
+              className={cn(
+                "text-[0.68rem]",
+                overLimit ? "font-medium text-[var(--color-red)]" : "text-[var(--color-fg-subtle)]",
+              )}
+            >
+              {text.length}/{limit}
+            </span>
+            {changedFromOriginal && (
+              <>
+                <span className="text-[0.68rem] text-[var(--color-fg-subtle)]">edited</span>
+                <button
+                  onClick={() => setDraft(originalRef.current)}
+                  className="ml-auto text-[0.68rem] text-[var(--color-fg-subtle)] underline hover:text-[var(--color-fg)]"
+                >
+                  Revert to original
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      ) : (
+        <div className="rounded-lg border border-[var(--color-border-strong)] bg-[var(--color-bg)] px-3 py-2.5">
+          <p className="whitespace-pre-wrap text-[0.88rem] text-[var(--color-fg)]">{tweet.text}</p>
+          <p className="mt-1.5 text-[0.68rem] text-[var(--color-fg-subtle)]">
+            {tweet.text.length} characters
+          </p>
+        </div>
+      )}
+
+      {tweet.status === "pending" ? (
+        <>
+          {/* A previous attempt was refused by X. Nothing was published, so the
+              tweet is still here to retry once the cause is fixed. */}
+          {tweet.result && (
+            <p className="rounded-md border border-[var(--color-red)]/30 bg-[var(--color-red)]/5 px-2.5 py-1.5 text-[0.75rem] text-[var(--color-red)]">
+              Last attempt failed — nothing was posted. {tweet.result.replace(/^\[ERROR\]\s*/, "")}
+            </p>
+          )}
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              onClick={() => decide("post")}
+              disabled={busy !== null || overLimit || !text.trim()}
+            >
+              {busy === "post" ? <Loader2 className="h-3.5 w-3.5 spin" /> : <Send className="h-3.5 w-3.5" />}
+              {tweet.result ? "Try again" : "Post"}
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => decide("reject")}
+              disabled={busy !== null}
+            >
+              {busy === "reject" ? <Loader2 className="h-3.5 w-3.5 spin" /> : <X className="h-3.5 w-3.5" />}
+              Reject
+            </Button>
+          </div>
+          <p className="text-[0.68rem] text-[var(--color-fg-subtle)]">
+            Edit the text above if you want to change it. Nothing is posted until you press Post,
+            which publishes exactly what is in the box — publicly, and not undoable from here.
+          </p>
+        </>
+      ) : (
+        <p className="text-[0.78rem]">
+          {posted ? (
+            <span className="text-[var(--color-green)]">
+              Posted ·{" "}
+              <a
+                href={url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-[var(--color-blue)] underline"
+              >
+                view on X
+              </a>
+            </span>
+          ) : tweet.status === "cancelled" ? (
+            <span className="text-[var(--color-fg-subtle)]">Rejected — nothing was posted.</span>
+          ) : tweet.status === "expired" ? (
+            <span className="text-[var(--color-fg-subtle)]">
+              Expired — ask again to post this.
+            </span>
+          ) : (
+            <span className="text-[var(--color-red)]">{tweet.result || "Failed to post."}</span>
+          )}
+        </p>
+      )}
+    </div>
   );
 }
 
@@ -113,6 +319,7 @@ export const ChatMessage = memo(function ChatMessage({
   contextTs,
   onOpenContext,
   canSpeak = false,
+  identityId = "",
 }: {
   message: Message;
   /** Timestamp of the turn's context trace, or null if none. */
@@ -121,6 +328,9 @@ export const ChatMessage = memo(function ChatMessage({
   onOpenContext?: (ts: string) => void;
   /** Whether the ElevenLabs voice feature is configured/enabled. */
   canSpeak?: boolean;
+  /** Needed to resolve and act on a staged tweet — the approval endpoints are
+   *  identity-scoped, so the card cannot render without it. */
+  identityId?: string;
 }) {
   const isUser = message.role === "user";
   const isWatcher = !!(message as any)._watcher;
@@ -146,19 +356,29 @@ export const ChatMessage = memo(function ChatMessage({
       .replace(/^\[AGENT RESULT\]\s*/i, "")
       .replace(/\s*\[\/AGENT RESULT\]$/i, "")
       .trim();
+
+    // A staged tweet renders as an approval card instead of raw text. The
+    // marker is stripped either way so it never reaches the reader.
+    const staged = inner.match(TWEET_CONFIRM_RE);
+    const body = staged ? inner.replace(TWEET_CONFIRM_RE, "").trim() : inner;
+
     return (
       <div className="px-4 py-1.5">
         <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">
           {/* Header bar */}
           <div className="flex items-center gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5">
             <span className="text-[0.7rem] font-semibold uppercase tracking-wider text-[var(--color-fg-subtle)]">
-              ⚙ Agent Result
+              {staged ? "Tweet — your approval needed" : "⚙ Agent Result"}
             </span>
-            <CopyButton text={inner} />
+            <CopyButton text={body} />
           </div>
           {/* Body */}
           <div className="px-3 py-2.5">
-            <Markdown>{inner || "[no output]"}</Markdown>
+            {staged && identityId ? (
+              <TweetConfirmCard identityId={identityId} code={staged[1].toLowerCase()} />
+            ) : (
+              <Markdown>{body || "[no output]"}</Markdown>
+            )}
           </div>
         </div>
       </div>

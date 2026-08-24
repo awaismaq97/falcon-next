@@ -324,6 +324,39 @@ export interface WatcherAgent {
   created_at: string | null;
 }
 
+/** The watcher persona: two authored halves around a derived command list. */
+export interface WatcherPersona {
+  /** Editable. Explains the [AGENT: …] command format. */
+  preamble: string;
+  /** Editable. The RULES block appended after the commands. */
+  rules: string;
+  /** Read-only — rebuilt from the live tool registry on every read. */
+  commands: string;
+  /** The full text the model receives. */
+  assembled: string;
+  updated_at: string | null;
+  updated_by: string;
+  is_default: boolean;
+}
+
+/** A tweet proposed by the agent, awaiting the user's Post / Reject decision. */
+export interface StagedTweet {
+  code: string;
+  identity_id: string;
+  text: string;
+  status: "pending" | "posted" | "cancelled" | "expired" | "failed";
+  staged_at: string;
+  resolved_at: string | null;
+  /** Tweet URL once posted; on a failed attempt, why X refused. */
+  result: string;
+  /** Failed attempts so far. A rejected post leaves the tweet pending and retryable. */
+  attempts?: number;
+  /** True once the user has rewritten the agent's draft. */
+  edited?: boolean;
+  /** Server-side character limit, so the editor's counter matches what posts. */
+  max_chars?: number;
+}
+
 /** A research job as returned by the list endpoint — no findings or report. */
 export interface ResearchJobSummary {
   job_id: string;

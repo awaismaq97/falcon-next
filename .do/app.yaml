@@ -64,6 +64,17 @@ services:
       # real value in the Dashboard alongside the other secrets.
       - key: TAVILY_API_KEY
         scope: RUN_TIME
+      # X/Twitter OAuth 1.0a user-context credentials for post_tweet. All four
+      # are required — posting happens as a user, so an app-only bearer token
+      # is not sufficient.
+      - key: TWITTER_API_KEY
+        scope: RUN_TIME
+      - key: TWITTER_API_SECRET
+        scope: RUN_TIME
+      - key: TWITTER_ACCESS_TOKEN
+        scope: RUN_TIME
+      - key: TWITTER_ACCESS_SECRET
+        scope: RUN_TIME
       - key: CORS_ORIGINS
         scope: RUN_TIME
         value: "*"

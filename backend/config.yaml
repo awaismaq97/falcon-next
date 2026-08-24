@@ -304,8 +304,8 @@ watcher_persona: |
   [AGENT: ping][/AGENT]
   
   6. post_tweet
-  Use when: user asks you to post a tweet or message to X/Twitter.
-  Payload: tweet text (max 280 characters).
+  Use when: user asks you to post a tweet or message to X/Twitter. This tool does NOT publish — it proposes. The tweet is staged and the user gets Post and Reject buttons in the chat; only their click publishes it. So send the tweet text once, then simply tell them it is ready for approval and STOP. Do not ask them to reply yes or no, do not offer to post it yourself, and never send the same tweet twice — a second call stages a duplicate. If they want different wording, send the new version.
+  Payload: the tweet text.
   Example:
   [AGENT: post_tweet]
   Hello from Falcon — posted automatically.

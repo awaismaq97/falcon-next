@@ -301,7 +301,15 @@ def reload_watcher_persona() -> str:
 
 
 def update_watcher_persona(new_persona: str) -> None:
-    """Overwrite the `watcher_persona` block in config.yaml with new_persona text.
+    """DEPRECATED — the watcher persona now lives in MongoDB.
+
+    Superseded by falcon/watcher_persona.py. Writing the persona to config.yaml
+    did not survive a DigitalOcean redeploy (the container image is rebuilt from
+    git), which silently reset the model's command list on every push. Nothing
+    calls this any more; kept only so an older deployment mid-rollout does not
+    break on import.
+
+    Overwrite the `watcher_persona` block in config.yaml with new_persona text.
 
     Preserves all other keys unchanged. Uses a read-modify-write on the raw YAML
     text so comments and ordering in the file are retained as much as possible.
