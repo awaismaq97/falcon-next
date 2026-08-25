@@ -18,7 +18,9 @@ Built-in tools (v1 — dummy/safe):
   post_tweet   — posts to X, but only after a human confirms. Sending text
                  stages it and returns a code; a separate `confirm <code>` in a
                  later message publishes it. Requires TWITTER_* credentials.
-  fetch_replies— stub (NOT CONFIGURED)
+  fetch_replies— reads the thread under a post on X, given its URL or id.
+                 Read-only. Uses TWITTER_BEARER_TOKEN if set, otherwise the same
+                 TWITTER_* OAuth values as post_tweet.
   research     — long-running search → browse → summarize. Starts a background
                  job whose state lives in MongoDB, so it survives restarts and
                  can be collected days later. See falcon/research.py.
@@ -491,13 +493,370 @@ def _post_tweet(payload: str) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# fetch_replies — read the conversation under a post
+# ---------------------------------------------------------------------------
+
+# X has no "get replies" endpoint. Replies are found by searching for posts that
+# share the thread's conversation_id, which every post in a thread carries and
+# which equals the id of the post that started it.
+#
+# Two consequences shape everything below:
+#   * Recent search only reaches back 7 days. Replies to an older post are not
+#     missing — they are unreachable without full-archive access (Pro tier up).
+#   * The search returns the whole thread, replies-to-replies included, not just
+#     the posts answering the one that was asked about.
+
+# Accepts what a person actually pastes: a status URL from x.com or twitter.com
+# with any trailing query string, the /i/web/status/ form post_tweet returns, or
+# a bare id. Matched strictly rather than by scanning for digits, so a number in
+# a username can never be mistaken for the post id.
+_STATUS_URL_RE = re.compile(
+    r"(?:twitter|x)\.com/(?:[^/\s?#]+|i/web)/status(?:es)?/(\d{5,25})", re.I
+)
+_BARE_ID_RE = re.compile(r"^\d{5,25}$")
+
+# An optional trailing "limit N", so a big thread can be opened up deliberately
+# rather than by default.
+_REPLY_LIMIT_RE = re.compile(r"\s+limit\s+(\d{1,3})\s*$", re.I)
+
+# Reads are billed per post on X's pay-per-use pricing, so an unbounded fetch on
+# a viral thread is a real bill rather than just a slow call. The default is
+# meant to answer "what did people say?" in one page; larger needs an explicit
+# limit, and even that is bounded.
+_DEFAULT_REPLY_LIMIT = 50
+_MAX_REPLY_LIMIT = 200
+
+# X rejects max_results below 10, so a smaller limit still costs a full page.
+_MIN_PAGE = 10
+
+
+def _x_read_auth() -> tuple[dict, object | None, str]:
+    """Credentials for X read endpoints, as ``(headers, auth, error)``.
+
+    Prefers the app-only bearer token when one is set: it is the credential X
+    documents for search, and it draws on a rate-limit pool separate from the
+    user-context tokens post_tweet spends. Falls back to the OAuth 1.0a keys so
+    reading works with what is already configured, without requiring a fifth
+    secret before the tool does anything at all.
+    """
+    import os
+
+    bearer = os.environ.get("TWITTER_BEARER_TOKEN", "").strip()
+    if bearer:
+        return {"Authorization": f"Bearer {bearer}"}, None, ""
+
+    missing = [k for k in _TWITTER_KEYS if not os.environ.get(k, "").strip()]
+    if missing:
+        return {}, None, (
+            "[NOT CONFIGURED] fetch_replies needs either TWITTER_BEARER_TOKEN or all "
+            f"four OAuth values. Missing: {', '.join(missing)}."
+        )
+
+    try:
+        from requests_oauthlib import OAuth1
+    except ImportError:
+        return {}, None, (
+            "[NOT CONFIGURED] fetch_replies needs the requests-oauthlib package. "
+            "Add it to requirements.txt and reinstall."
+        )
+
+    return {}, OAuth1(
+        os.environ["TWITTER_API_KEY"].strip(),
+        os.environ["TWITTER_API_SECRET"].strip(),
+        os.environ["TWITTER_ACCESS_TOKEN"].strip(),
+        os.environ["TWITTER_ACCESS_SECRET"].strip(),
+    ), ""
+
+
+def _x_get(path: str, params: dict, headers: dict, auth) -> tuple[dict | None, str]:
+    """One GET against the X API. Returns ``(json, error)`` — exactly one is set."""
+    import requests
+
+    try:
+        resp = requests.get(
+            f"https://api.x.com{path}",
+            params=params,
+            headers=headers,
+            auth=auth,
+            timeout=20,
+        )
+    except requests.RequestException as exc:
+        return None, f"[ERROR] fetch_replies could not reach X: {exc}"
+
+    if resp.status_code == 200:
+        try:
+            return resp.json() or {}, ""
+        except ValueError:
+            return None, "[ERROR] fetch_replies got a non-JSON response from X."
+
+    try:
+        body = resp.json()
+        detail = body.get("detail") or body.get("title") or str(body)[:300]
+    except ValueError:
+        detail = resp.text[:300]
+
+    # Same reasoning as post_tweet: these codes mean genuinely different things
+    # and guessing wrong costs an afternoon.
+    hint = {
+        401: " (credentials rejected — check the bearer token, or all four OAuth values)",
+        402: " (out of API credits — reads are billed per post retrieved; top up at "
+             "developer.x.com under Products)",
+        403: " (not permitted — search access is not included in this API tier)",
+        404: " (no such post — it may have been deleted, or its author may be protected)",
+        429: " (rate limited — wait for the window to reset before retrying)",
+    }.get(resp.status_code, "")
+
+    logger.warning("fetch_replies: HTTP %s — %s", resp.status_code, detail)
+    return None, f"[ERROR] fetch_replies failed: HTTP {resp.status_code}{hint} — {detail}"
+
+
+def _resolve_conversation(tweet_id: str, headers: dict, auth) -> tuple[dict, dict, str]:
+    """Look up one post, returning ``(post, author, error)``.
+
+    Costs one extra read, and buys two things worth more than it. A link pasted
+    from the middle of a thread is a *reply*, whose own id is not the
+    conversation id — searching on it would quietly return nothing. And the root
+    post's id and author are what distinguish a direct reply from a reply three
+    levels down.
+    """
+    data, err = _x_get(
+        f"/2/tweets/{tweet_id}",
+        {
+            # public_metrics is free here and is what makes an empty search
+            # readable: X reports how many replies exist, so "none returned" can
+            # be told apart from "none exist".
+            "tweet.fields": "conversation_id,author_id,created_at,text,public_metrics",
+            "expansions": "author_id",
+            "user.fields": "username,name",
+        },
+        headers,
+        auth,
+    )
+    if err:
+        return {}, {}, err
+
+    post = data.get("data") or {}
+    if not post:
+        return {}, {}, (
+            f"[ERROR] fetch_replies: X returned no post for id {tweet_id}. It may have "
+            "been deleted, or belong to a protected account."
+        )
+
+    users = {u["id"]: u for u in (data.get("includes") or {}).get("users") or []}
+    return post, users.get(post.get("author_id", ""), {}), ""
+
+
+def _search_conversation(
+    conversation_id: str, limit: int, headers: dict, auth
+) -> tuple[list, dict, str, str]:
+    """Page through a conversation. Returns ``(posts, users, error, warning)``.
+
+    ``error`` is set only when nothing at all was retrieved. A page failing after
+    some results are already in hand becomes a warning instead: the replies we
+    paid for are still worth showing, and re-running to chase the rest would
+    re-buy the ones we already have.
+    """
+    posts: list[dict] = []
+    users: dict[str, dict] = {}
+    token = ""
+
+    while len(posts) < limit:
+        params = {
+            "query": f"conversation_id:{conversation_id}",
+            "max_results": max(_MIN_PAGE, min(100, limit - len(posts))),
+            "tweet.fields": "author_id,created_at,in_reply_to_user_id,referenced_tweets",
+            "expansions": "author_id",
+            "user.fields": "username,name",
+        }
+        if token:
+            params["next_token"] = token
+
+        data, err = _x_get("/2/tweets/search/recent", params, headers, auth)
+        if err:
+            if posts:
+                return posts, users, "", f"Stopped early — {err}"
+            return [], {}, err, ""
+
+        for user in (data.get("includes") or {}).get("users") or []:
+            users[user["id"]] = user
+        posts.extend(data.get("data") or [])
+
+        token = (data.get("meta") or {}).get("next_token") or ""
+        if not token:
+            break
+
+    return posts[:limit], users, "", ""
+
+
+def _handle(user: dict, author_id: str) -> str:
+    return "@" + user.get("username", "") if user.get("username") else f"user {author_id}"
+
+
+def _is_direct_reply(post: dict, root_id: str) -> bool:
+    """True when this post answers the root itself, not another reply."""
+    for ref in post.get("referenced_tweets") or []:
+        if ref.get("type") == "replied_to":
+            return str(ref.get("id")) == root_id
+    return False
+
+
+def _post_age_days(root: dict) -> float | None:
+    """How old the post is, or None if X did not give a parseable timestamp."""
+    from datetime import datetime, timezone
+
+    raw = (root.get("created_at") or "").replace("Z", "+00:00")
+    if not raw:
+        return None
+    try:
+        return (datetime.now(timezone.utc) - datetime.fromisoformat(raw)).total_seconds() / 86400
+    except ValueError:
+        return None
+
+
+def _explain_empty(root: dict) -> str:
+    """Say *why* nothing came back, which is rarely 'nobody replied'.
+
+    X reports a reply_count on the post itself, so an empty search can be
+    diagnosed rather than guessed at. Without this the tool says "no replies
+    found" about a post X has just told us has replies — technically true,
+    completely misleading, and the model would repeat it to the user as fact.
+    """
+    stated = (root.get("public_metrics") or {}).get("reply_count")
+    age = _post_age_days(root)
+
+    if stated == 0:
+        return "This post has no replies — X reports a reply count of 0."
+
+    if stated:
+        plural = "reply" if stated == 1 else "replies"
+        if age is not None and age > 7:
+            return (
+                f"X reports {stated} {plural} on this post, but none could be retrieved: "
+                f"the post is {age:.0f} days old and recent search only covers the last 7 "
+                "days. Reading them would need full-archive search, which is not included "
+                "below X's Pro tier."
+            )
+        return (
+            f"X reports {stated} {plural} on this post, but the search returned none. "
+            "They may have been deleted, or come from protected or suspended accounts, "
+            "which are excluded from search results."
+        )
+
+    # No metrics to go on — fall back to naming the limitation.
+    if age is not None and age > 7:
+        return (
+            f"No replies found, but this post is {age:.0f} days old and recent search only "
+            "covers the last 7 days — so this does not mean it has none."
+        )
+    return (
+        "No replies found. Note that recent search only covers the last 7 days, so an "
+        "older post can show none even when it has them."
+    )
+
+
+def _shortfall_note(root: dict, direct: int, limit: int, hit_limit: bool) -> str:
+    """Flag replies X says exist but that search did not return."""
+    stated = (root.get("public_metrics") or {}).get("reply_count")
+    if hit_limit or not stated or direct >= stated:
+        return ""
+    age = _post_age_days(root)
+    why = (
+        f" — the post is {age:.0f} days old and search only reaches back 7"
+        if age is not None and age > 7
+        else " (deleted, protected or suspended authors are excluded from search)"
+    )
+    return f"X reports {stated} replies; {direct} were retrievable{why}."
+
+
+def _format_replies(
+    root: dict, root_author: dict, posts: list, users: dict, limit: int, warning: str
+) -> str:
+    root_id = str(root.get("id", ""))
+    root_handle = _handle(root_author, root.get("author_id", ""))
+
+    # The root shares the conversation id, so it comes back in its own search.
+    replies = [p for p in posts if str(p.get("id")) != root_id]
+    # Search returns newest first; a conversation reads better oldest first.
+    replies.reverse()
+
+    header = f"Replies to {root_handle} — https://x.com/i/web/status/{root_id}"
+    quoted = " ".join((root.get("text") or "").split())
+    if quoted:
+        header += f"\n> {quoted[:200]}{'…' if len(quoted) > 200 else ''}"
+
+    if not replies:
+        return f"{header}\n\n{_explain_empty(root)}"
+
+    lines = []
+    for i, post in enumerate(replies, start=1):
+        author = users.get(post.get("author_id", ""), {})
+        when = (post.get("created_at") or "")[:16].replace("T", " ")
+        kind = "" if _is_direct_reply(post, root_id) else "  (further down the thread)"
+        text = " ".join((post.get("text") or "").split())
+        lines.append(f"{i}. {_handle(author, post.get('author_id', ''))} · {when}{kind}\n   {text}")
+
+    direct = sum(1 for p in replies if _is_direct_reply(p, root_id))
+    hit_limit = len(replies) >= limit
+    summary = f"{len(replies)} post{'s' if len(replies) != 1 else ''} in the thread ({direct} direct)"
+    if hit_limit:
+        summary += f" — stopped at the limit of {limit}; add 'limit N' for more"
+
+    out = f"{header}\n\n{summary}\n\n" + "\n".join(lines)
+    shortfall = _shortfall_note(root, direct, limit, hit_limit)
+    if shortfall:
+        out += f"\n\n[NOTE] {shortfall}"
+    if warning:
+        out += f"\n\n[WARNING] {warning}"
+    return out
+
+
 @register_tool("fetch_replies")
 def _fetch_replies(payload: str) -> str:
-    """Fetch replies to a tweet URL or ID. [NOT CONFIGURED]"""
-    return (
-        "[NOT CONFIGURED] fetch_replies requires Twitter API credentials. "
-        "Set TWITTER_API_KEY etc. to enable."
+    """Read the replies under a post on X.
+
+    Payload: a post URL or bare id, optionally followed by ``limit N``.
+    Read-only — this tool never writes to X.
+    """
+    raw = (payload or "").strip()
+    if not raw:
+        return "[ERROR] fetch_replies requires a post URL or id as payload."
+
+    limit = _DEFAULT_REPLY_LIMIT
+    match = _REPLY_LIMIT_RE.search(raw)
+    if match:
+        limit = max(1, min(_MAX_REPLY_LIMIT, int(match.group(1))))
+        raw = raw[: match.start()].strip()
+
+    found = _STATUS_URL_RE.search(raw)
+    tweet_id = found.group(1) if found else (raw if _BARE_ID_RE.match(raw) else "")
+    if not tweet_id:
+        return (
+            "[ERROR] fetch_replies could not find a post id in that payload. Give it a "
+            "link like https://x.com/user/status/1234567890, or the numeric id on its own."
+        )
+
+    headers, auth, err = _x_read_auth()
+    if err:
+        return err
+
+    root, root_author, err = _resolve_conversation(tweet_id, headers, auth)
+    if err:
+        return err
+
+    # Falls back to the id itself, which is correct whenever the link points at
+    # the start of a thread — the common case.
+    conversation_id = str(root.get("conversation_id") or tweet_id)
+
+    posts, users, err, warning = _search_conversation(conversation_id, limit, headers, auth)
+    if err:
+        return err
+
+    logger.info(
+        "fetch_replies: conversation %s → %d posts (limit %d)",
+        conversation_id, len(posts), limit,
     )
+    return _format_replies(root, root_author, posts, users, limit, warning)
 
 
 # ---------------------------------------------------------------------------

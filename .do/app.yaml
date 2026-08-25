@@ -75,6 +75,11 @@ services:
         scope: RUN_TIME
       - key: TWITTER_ACCESS_SECRET
         scope: RUN_TIME
+      # Optional. App-only token used by fetch_replies for reads, keeping search
+      # off the user-context rate limit that post_tweet spends. Reading falls
+      # back to the four values above when this is unset.
+      - key: TWITTER_BEARER_TOKEN
+        scope: RUN_TIME
       - key: CORS_ORIGINS
         scope: RUN_TIME
         value: "*"

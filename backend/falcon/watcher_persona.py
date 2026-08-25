@@ -89,9 +89,13 @@ BUILTIN_DESCRIPTIONS: dict[str, dict] = {
         "example": "Hello from Falcon.",
     },
     "fetch_replies": {
-        "use_when": "user asks you to get replies or mentions for a tweet.",
-        "payload": "tweet URL or tweet ID.",
-        "example": "https://twitter.com/user/status/1234567890",
+        "use_when": (
+            "user asks what people said in reply to a post on X. Reads only — it never "
+            "posts. Only reaches replies from the last 7 days, so report an empty result "
+            "as 'none found in the last 7 days' rather than 'nobody replied'."
+        ),
+        "payload": "the post URL or its numeric id, optionally followed by 'limit N'.",
+        "example": "https://x.com/user/status/1234567890",
     },
     "spawn_agent": {
         "use_when": "you need to create a new tool/agent that doesn't exist yet.",
