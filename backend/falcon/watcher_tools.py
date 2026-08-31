@@ -859,6 +859,151 @@ def _fetch_replies(payload: str) -> str:
     return _format_replies(root, root_author, posts, users, limit, warning)
 
 
+@register_tool("persistent_memory_access_bridge")
+def _persistent_memory_access_bridge(payload: str) -> str:
+    """Prove the database really reads and writes, and report the real result.
+
+    Runs an actual round-trip against the live database — write, read back,
+    compare, update, re-read — plus a durability check for probes left by
+    earlier processes. Returns whichever verdict is true; it has no success
+    path that does not depend on the round-trip having actually worked.
+
+    Payload is ignored, so any phrasing the model reaches for still runs the
+    same probe.
+    """
+    from falcon import memory_bridge
+
+    try:
+        return memory_bridge.format_report(memory_bridge.check())
+    except Exception as exc:  # noqa: BLE001
+        # check() catches its own step failures, so reaching here means the
+        # module could not run at all — still a real answer, not a claim.
+        logger.error("persistent_memory_access_bridge: probe could not run: %s", exc)
+        return (
+            f"MEMORY BRIDGE: FAILED — the probe could not run at all: "
+            f"{type(exc).__name__}: {exc}\n\n"
+            "Storage is NOT confirmed working. Do not claim anything was remembered, "
+            "saved or recalled."
+        )
+
+
+@register_tool("memory_status")
+def _memory_status(payload: str) -> str:
+    """Report storage status: configured, writable, and when it last wrote.
+
+    "Configured" is answered from the environment, but "writable" is not taken
+    on trust — it runs the bridge probe, because a set connection string proves
+    only that someone typed one.
+    """
+    import os
+
+    from falcon import documents_store as Store
+    from falcon import memory_bridge
+
+    configured = bool(os.environ.get("MONGODB_URI", "").strip())
+    lines = ["MEMORY STATUS", ""]
+    lines.append(f"configured : {'yes' if configured else 'NO — MONGODB_URI is not set'}")
+
+    if not configured:
+        lines.append("writable   : no (cannot connect without a connection string)")
+        lines.append("last_write : unknown")
+        lines.append("")
+        lines.append("Storage is NOT working. Do not claim anything was saved or remembered.")
+        return "\n".join(lines)
+
+    res = memory_bridge.check()
+    if res["ok"]:
+        dur = res.get("durability") or {}
+        proven = " (persistence proven across restarts)" if dur.get("survived_restart") else \
+                 " (first probe on this database — durability not yet demonstrable)"
+        lines.append(f"writable   : yes — verified round-trip in {res['total_ms']} ms{proven}")
+    else:
+        lines.append(f"writable   : NO — failed at '{res['failed_step']}': {res['error']}")
+
+    last = Store.last_write()
+    if last:
+        when = last.get("at")
+        when_s = when.strftime("%Y-%m-%d %H:%M UTC") if hasattr(when, "strftime") else str(when)
+        lines.append(f"last_write : {when_s} — {last.get('filename', '?')} ({last.get('storage_id', '?')})")
+    else:
+        lines.append("last_write : none recorded yet")
+
+    try:
+        st = Store.stats()
+        by = ", ".join(f"{k}={v}" for k, v in sorted(st["by_source"].items())) or "none"
+        lines.append(f"documents  : {st['total']} stored ({by})")
+    except Exception as exc:  # noqa: BLE001
+        lines.append(f"documents  : could not count ({exc})")
+
+    if not res["ok"]:
+        lines.append("")
+        lines.append("Storage is NOT confirmed working. Do not claim anything was saved.")
+    return "\n".join(lines)
+
+
+@register_tool("list_documents")
+def _list_documents(payload: str) -> str:
+    """List stored documents, or search them when given a term.
+
+    Payload: empty to list recent documents, or a search term.
+    """
+    from falcon import documents_store as Store
+
+    term = (payload or "").strip()
+    identity = current_identity()
+    docs = Store.search(identity, term) if term else Store.list_documents(identity)
+
+    if not docs:
+        if term:
+            return f"No stored documents match {term!r}."
+        return (
+            "No documents are stored for this identity. Note that documents uploaded "
+            "before durable storage was added were never saved — use the backfill to "
+            "recover any that are still in the audit log."
+        )
+
+    header = f"{len(docs)} document(s)" + (f" matching {term!r}" if term else "")
+    lines = [header, ""]
+    for d in docs:
+        when = d.get("saved_at")
+        when_s = when.strftime("%Y-%m-%d") if hasattr(when, "strftime") else str(when)[:10]
+        lines.append(
+            f"  {d['storage_id']}  {d.get('filename', '?')}  "
+            f"({d.get('chars', 0)} chars, {d.get('source', '?')}, {when_s})"
+        )
+    lines.append("")
+    lines.append("Use read_document with a storage id to read one.")
+    return "\n".join(lines)
+
+
+@register_tool("read_document")
+def _read_document(payload: str) -> str:
+    """Read a stored document back by its storage id.
+
+    Payload: the storage id, e.g. doc_a1b2c3d4e5f6.
+    """
+    from falcon import documents_store as Store
+
+    storage_id = (payload or "").strip().split()[0] if (payload or "").strip() else ""
+    if not storage_id:
+        return "[ERROR] read_document requires a storage id (e.g. doc_a1b2c3d4e5f6)."
+
+    doc = Store.get(storage_id, current_identity())
+    if not doc:
+        return (
+            f"[ERROR] No stored document with id {storage_id!r} for this identity. "
+            "Use list_documents to see what is available."
+        )
+
+    when = doc.get("saved_at")
+    when_s = when.strftime("%Y-%m-%d %H:%M UTC") if hasattr(when, "strftime") else str(when)
+    head = (
+        f"{doc.get('filename', '?')} ({doc['storage_id']}, {doc.get('chars', 0)} chars, "
+        f"saved {when_s})"
+    )
+    return f"{head}\n\n{doc.get('text', '')}"
+
+
 # ---------------------------------------------------------------------------
 # research — long-running search / browse / summarize
 # ---------------------------------------------------------------------------

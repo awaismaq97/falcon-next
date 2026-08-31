@@ -4,8 +4,14 @@ documents.py — Extract text from uploaded documents for chat context.
 The chat send flow is JSON (base64 for images), so documents follow the same
 "process on the server, send content in the request" shape: the browser uploads
 a file here, we extract plain text, and it POSTs that text back with the next
-message (which the send flow injects into the model payload). Raw files are never
-stored — only the extracted text, for exactly one turn.
+message (which the send flow injects into the model payload).
+
+Raw binaries are never stored, but the extracted text now is: the chat send flow
+writes every attachment to falcon.documents_store and records its storage id, so
+a manuscript uploaded today is readable in a session next week. Passing
+identity_id here stores it at upload time as well. Before this existed the text
+survived exactly one turn, which is why documents appeared to vanish between
+messages.
 
 Supported: PDF, Word (.docx), Excel (.xlsx/.xlsm), PowerPoint (.pptx), and any
 UTF-8 text format (csv, tsv, txt, md, json, xml, html, yaml, log). Legacy binary
@@ -16,7 +22,7 @@ from __future__ import annotations
 import io
 import logging
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 logger = logging.getLogger("falcon.documents")
 
@@ -135,8 +141,41 @@ def _extract(name: str, ext: str, data: bytes) -> str:
     return text
 
 
+@router.get("/stored")
+async def list_stored(identity_id: str = "", q: str = "", limit: int = 50) -> dict:
+    """Documents durably stored for an identity, without their text."""
+    from falcon import documents_store as Store
+
+    docs = Store.search(identity_id, q, limit) if q else Store.list_documents(identity_id, limit)
+    return {"documents": docs, "count": len(docs)}
+
+
+@router.get("/stored/{storage_id}")
+async def get_stored(storage_id: str, identity_id: str = "") -> dict:
+    """One stored document, including its full text."""
+    from falcon import documents_store as Store
+
+    doc = Store.get(storage_id, identity_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"No stored document {storage_id!r}.")
+    return doc
+
+
+@router.delete("/stored/{storage_id}")
+async def delete_stored(storage_id: str, identity_id: str = "") -> dict:
+    """Delete one stored document. The only thing that removes stored content."""
+    from falcon import documents_store as Store
+
+    if not Store.delete(storage_id, identity_id):
+        raise HTTPException(status_code=404, detail=f"No stored document {storage_id!r}.")
+    return {"deleted": True, "storage_id": storage_id}
+
+
 @router.post("/extract")
-async def extract_document(file: UploadFile = File(...)) -> dict:
+async def extract_document(
+    file: UploadFile = File(...),
+    identity_id: str = Form(""),
+) -> dict:
     data = await file.read()
     if not data:
         raise HTTPException(status_code=400, detail="Empty file.")
@@ -161,9 +200,33 @@ async def extract_document(file: UploadFile = File(...)) -> dict:
     if truncated:
         text = text[:MAX_TEXT_CHARS]
 
-    return {
+    result = {
         "filename": name,
         "chars": len(text),
         "truncated": truncated,
         "text": text,
+        # Populated only when an identity is supplied. The chat send flow saves
+        # attachments itself, so an extract without an identity is not a lost
+        # document — it is one that gets stored a moment later, on send.
+        "saved": False,
+        "storage_id": "",
+        "save_error": "",
     }
+
+    if identity_id.strip():
+        from falcon import documents_store as Store
+
+        try:
+            saved = Store.save(identity_id.strip(), name, text, source="upload")
+            result["saved"] = saved["ok"]
+            result["storage_id"] = saved.get("storage_id", "")
+            result["save_error"] = saved.get("error", "")
+            if not saved["ok"]:
+                logger.error("document %r was NOT saved: %s", name, saved.get("error"))
+        except Exception as exc:  # noqa: BLE001
+            # Extraction succeeded, so the turn can still proceed — but never
+            # report a save that did not happen.
+            logger.error("document %r could not be stored: %s", name, exc)
+            result["save_error"] = str(exc)
+
+    return result

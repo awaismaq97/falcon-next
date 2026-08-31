@@ -217,6 +217,18 @@ _INDEX_SPECS: list[tuple[str, object, dict]] = [
     ("research_jobs", [("status", 1), ("created_at", 1)], {}),
     ("research_jobs", [("identity_id", 1), ("created_at", -1)], {}),
     ("watcher_settings", "identity_id", {"unique": True}),
+    # Memory-bridge probes. Sorted by written_at when pruning and when finding
+    # the oldest surviving probe; boot_id backs the durability count.
+    ("memory_bridge_probes", "written_at", {}),
+    ("memory_bridge_probes", "boot_id", {}),
+    ("memory_bridge_probes", "nonce", {"unique": True}),
+    # Durable document storage. storage_id is unique because it is handed out as
+    # a confirmation — two documents answering to one id would make every
+    # returned id meaningless. The identity+hash index backs deduplication on
+    # re-upload, which runs on every save.
+    ("stored_documents", "storage_id", {"unique": True}),
+    ("stored_documents", [("identity_id", 1), ("saved_at", -1)], {}),
+    ("stored_documents", [("identity_id", 1), ("content_sha256", 1)], {}),
 ]
 
 

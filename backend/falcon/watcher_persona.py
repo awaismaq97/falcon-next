@@ -61,7 +61,12 @@ DEFAULT_RULES = (
     "- Do not describe what the command will do inside the block — just the payload.\n"
     "- These tools are real and act on the outside world. Never invent placeholder "
     "inputs such as example.com — if you do not have the information a command needs, "
-    "ask the user for it instead of guessing."
+    "ask the user for it instead of guessing.\n"
+    "- Never claim something was remembered, saved, stored or recalled without having "
+    "run persistent_memory_access_bridge and seen it report success. Report what the "
+    "bridge actually returns. If it reports a failure, say storage is not working; if "
+    "you have not run it, say the status is unverified. An assumed memory claim is the "
+    "one failure the user cannot detect for themselves."
 )
 
 # Hand-written descriptions for built-in tools. A tool absent from this map —
@@ -96,6 +101,47 @@ BUILTIN_DESCRIPTIONS: dict[str, dict] = {
         ),
         "payload": "the post URL or its numeric id, optionally followed by 'limit N'.",
         "example": "https://x.com/user/status/1234567890",
+    },
+    "persistent_memory_access_bridge": {
+        "use_when": (
+            "BEFORE you say anything about remembering, saving, storing or recalling — "
+            "and whenever the user asks whether memory or persistence is working. Run it "
+            "first, then report exactly what it returns. It performs a real write, read-back "
+            "and update against the live database, so its verdict is evidence rather than "
+            "assumption. Never state that something was remembered or saved on the strength "
+            "of your own impression: if this reports FAILED, say storage is not working, and "
+            "if you have not run it, say the status is unverified."
+        ),
+        "payload": "none.",
+        "example": "",
+    },
+    "memory_status": {
+        "use_when": (
+            "user asks whether memory, storage or saving is working, or you need the "
+            "current state before answering such a question. Reports three things: "
+            "configured, writable (verified by a real round-trip, not assumed), and "
+            "when the last successful write happened."
+        ),
+        "payload": "none.",
+        "example": "",
+    },
+    "list_documents": {
+        "use_when": (
+            "user refers to a document, manuscript, outline or file they uploaded "
+            "earlier — check what is actually stored before answering. Uploads are "
+            "saved with a storage id; this lists them."
+        ),
+        "payload": "empty to list recent documents, or a search term.",
+        "example": "chapter three",
+    },
+    "read_document": {
+        "use_when": (
+            "you need the contents of a previously uploaded document. Get its id from "
+            "list_documents first. This is how you recall a manuscript from an earlier "
+            "session — do not claim to remember its contents without reading it back."
+        ),
+        "payload": "the storage id.",
+        "example": "doc_a1b2c3d4e5f6",
     },
     "spawn_agent": {
         "use_when": "you need to create a new tool/agent that doesn't exist yet.",

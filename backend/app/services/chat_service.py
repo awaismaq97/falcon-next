@@ -83,15 +83,60 @@ def _compose_with_documents(message: str, documents) -> str:
     return f"{message}\n\n{doc_text}" if message.strip() else doc_text
 
 
-def _attachment_marker(images, documents) -> str:
-    """Compact marker persisted in place of raw image/document content."""
+def _persist_documents(identity_id: str, documents) -> list[dict]:
+    """Store each attached document durably, returning one result per file.
+
+    Called at send time rather than at upload time because this is where the
+    identity is known and where the document is definitely real rather than an
+    abandoned file picker. Never raises: a storage failure must not lose the
+    user's turn, so it is recorded and surfaced in the marker instead.
+    """
+    if not documents:
+        return []
+
+    from falcon import documents_store as Store
+
+    results = []
+    for d in documents:
+        name = getattr(d, "filename", "document")
+        text = getattr(d, "text", "") or ""
+        if not text.strip():
+            continue
+        try:
+            res = Store.save(identity_id, name, text, source="upload")
+        except Exception as exc:  # noqa: BLE001
+            res = {"ok": False, "storage_id": "", "filename": name, "error": str(exc)}
+        res.setdefault("filename", name)
+        results.append(res)
+        if not res["ok"]:
+            logger.error("chat: document %r was NOT saved: %s", name, res.get("error"))
+    return results
+
+
+def _attachment_marker(images, documents, doc_results=None) -> str:
+    """Compact marker persisted in place of raw image/document content.
+
+    Document entries carry their storage id, so a past turn shows not just that
+    a file was attached but exactly where it now lives — and, when a save
+    failed, says so plainly rather than implying the file was kept.
+    """
     parts = []
     if images:
         n = len(images)
         parts.append(f"🖼 _{n} image{'s' if n != 1 else ''} attached_")
     if documents:
-        names = ", ".join(getattr(d, "filename", "document") for d in documents)
-        parts.append(f"📎 _{names}_")
+        by_name = {r.get("filename"): r for r in (doc_results or [])}
+        labels = []
+        for d in documents:
+            name = getattr(d, "filename", "document")
+            res = by_name.get(name)
+            if res is None:
+                labels.append(name)
+            elif res.get("ok"):
+                labels.append(f"{name} → `{res['storage_id']}`")
+            else:
+                labels.append(f"{name} → ⚠ NOT SAVED")
+        parts.append(f"📎 _{', '.join(labels)}_")
     return "\n\n".join(parts)
 
 
@@ -276,8 +321,12 @@ def run_send_flow(req: ChatSendRequest, emit: Emit) -> None:
 
     # Persisted user text carries a marker when images/documents were attached
     # (raw content is never stored) so past turns visibly show what was sent.
+    # Persist attachments before building the marker, so the marker can carry a
+    # real storage id (or an honest "NOT SAVED") rather than just a filename.
+    doc_results = _persist_documents(identity_id, documents)
+
     logged_user_input = user_input
-    marker = _attachment_marker(images, documents)
+    marker = _attachment_marker(images, documents, doc_results)
     if marker:
         logged_user_input = f"{user_input}\n\n{marker}" if user_input.strip() else marker
 

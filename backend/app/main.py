@@ -47,6 +47,24 @@ async def lifespan(app: FastAPI):
         get_db()
         logger.info("MongoDB connection warmed")
 
+        # Prove storage actually reads and writes before anything downstream
+        # relies on it. Deliberately first and deliberately loud: a warmed
+        # connection only means a handle was created, and the failure this
+        # guards against — storage that looks fine while silently losing data
+        # on redeploy — is invisible until someone notices the assistant has
+        # forgotten something it claimed to remember. Logged at ERROR on
+        # failure so it cannot be mistaken for routine startup chatter.
+        try:
+            from falcon.memory_bridge import startup_report
+
+            report = startup_report()
+            (logger.info if "OK" in report.split("—")[0] else logger.error)(report)
+        except Exception as bridge_exc:  # noqa: BLE001
+            logger.error(
+                "MEMORY BRIDGE could not run at startup: %s. Persistence is UNVERIFIED.",
+                bridge_exc,
+            )
+
         # Seed the default admin account on first boot (no-op if already exists).
         try:
             from falcon.admin_users import seed_first_admin
