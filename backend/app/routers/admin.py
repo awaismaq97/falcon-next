@@ -174,7 +174,11 @@ def admin_login(req: LoginRequest) -> LoginResponse:
             username=req.username,
             role=role,
             identity_id=identity_id,
-            features=portal.get("features"),
+            # Merged with the defaults: a feature added since this account was
+            # created is absent from its stored dict, and the client reads a
+            # missing flag as "not disabled" — which would show an opt-in tab
+            # to everyone who predates it.
+            features=AdminUsers.merge_features(portal.get("features")),
         )
 
     # 3. Neither matched

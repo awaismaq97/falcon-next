@@ -25,11 +25,20 @@ document back, and compares a content hash before reporting success, so a
 returned storage id always means the bytes are actually retrievable. A save that
 cannot be verified is reported as a failure rather than a hopeful id — the whole
 point is that "saved" stops being a guess.
+
+Two kinds of entry live here
+----------------------------
+Uploads arrive with a filename and no other metadata. Library entries — written
+deliberately through the ``library_store`` command — arrive with a title and
+tags instead, because nothing uploaded a file. Both are the same record: ``title``
+is the display name and defaults to the filename, so an upload needs no special
+casing and a library entry needs no fake filename.
 """
 from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import secrets
 from datetime import datetime, timezone
 from typing import Any
@@ -44,6 +53,10 @@ COLL = "stored_documents"
 # extraction cap in the documents router, so text arriving from there is never
 # truncated twice.
 MAX_TEXT_CHARS = 200_000
+
+MAX_TITLE_CHARS = 300
+MAX_TAGS = 32
+MAX_TAG_CHARS = 60
 
 
 def _now() -> datetime:
@@ -63,6 +76,45 @@ def _digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
 
 
+def normalize_tags(tags: list[str] | tuple | str | None) -> list[str]:
+    """Accept a list or a comma/newline-separated string; return clean tags.
+
+    Casing is preserved — a tag is the user's word, not a slug — but duplicates
+    are removed case-insensitively so "Draft" and "draft" cannot both be stored
+    and then each fail to match the other.
+    """
+    if not tags:
+        return []
+    if isinstance(tags, str):
+        raw = re.split(r"[,\n;]+", tags)
+    else:
+        # A list may still hold comma-joined strings if a caller was sloppy.
+        raw = []
+        for item in tags:
+            raw.extend(re.split(r"[,\n;]+", str(item)))
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for tag in raw:
+        tag = tag.strip().strip("#").strip()
+        if not tag:
+            continue
+        tag = tag[:MAX_TAG_CHARS]
+        key = tag.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(tag)
+        if len(out) >= MAX_TAGS:
+            break
+    return out
+
+
+def display_name(doc: dict) -> str:
+    """What to call a stored record: its title, falling back to its filename."""
+    return (doc.get("title") or doc.get("filename") or "untitled").strip()
+
+
 def save(
     identity_id: str,
     filename: str,
@@ -70,6 +122,10 @@ def save(
     *,
     source: str = "upload",
     kind: str = "document",
+    title: str = "",
+    tags: list[str] | str | None = None,
+    data: bytes | None = None,
+    content_type: str = "",
     meta: dict | None = None,
 ) -> dict[str, Any]:
     """Store a document and verify it is readable. Returns an explicit result.
@@ -80,9 +136,17 @@ def save(
     ``ok=True``  → ``storage_id`` is real and the content has been read back.
     ``ok=False`` → ``error`` says what went wrong. Nothing was saved that can be
                    relied on, and the caller must say so rather than imply a save.
+
+    Pass ``data`` to keep the original file alongside the extracted text, so the
+    upload can be handed back as the file it was rather than as its text. If the
+    bytes cannot be stored the text still is: losing the download is worse than
+    losing nothing, but far better than discarding a manuscript over it. The
+    result then carries ``file_error`` and ``has_file`` stays False.
     """
     text = (text or "").strip()
     filename = (filename or "untitled").strip()
+    title = (title or "").strip()[:MAX_TITLE_CHARS] or filename
+    tag_list = normalize_tags(tags)
 
     if not text:
         return {"ok": False, "storage_id": "", "error": "refusing to save an empty document"}
@@ -97,28 +161,93 @@ def save(
     # per identity so two users uploading the same manuscript keep their own.
     existing = _coll().find_one(
         {"identity_id": identity_id, "content_sha256": digest},
-        {"storage_id": 1, "filename": 1, "saved_at": 1},
+        {"storage_id": 1, "filename": 1, "title": 1, "tags": 1, "saved_at": 1,
+         "file_id": 1, "content_type": 1, "bytes": 1},
     )
     if existing:
         logger.info(
             "documents_store: %s already stored as %s", filename, existing["storage_id"]
         )
+        # Same body, new metadata: keep the id stable (it may already have been
+        # quoted back to the user) but do not throw the new title and tags away.
+        merged_tags = normalize_tags(list(existing.get("tags") or []) + tag_list)
+        changes: dict[str, Any] = {}
+        if title and title != existing.get("title"):
+            changes["title"] = title
+        if merged_tags != list(existing.get("tags") or []):
+            changes["tags"] = merged_tags
+        # A record stored before the original was kept — or first uploaded as
+        # pasted text and now as the actual file — gets its bytes backfilled
+        # rather than being left as a text-only entry forever.
+        file_error = ""
+        if data and not existing.get("file_id"):
+            stored = _store_bytes(data, filename, identity_id, content_type,
+                                  existing["storage_id"])
+            if stored.get("ok"):
+                changes.update({
+                    "file_id": stored["file_id"],
+                    "content_type": stored["content_type"],
+                    "bytes": stored["bytes"],
+                    "file_sha256": stored["sha256"],
+                })
+            else:
+                file_error = stored.get("error", "")
+
+        if changes:
+            try:
+                _coll().update_one({"storage_id": existing["storage_id"]}, {"$set": changes})
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("documents_store: could not update metadata: %s", exc)
+                changes = {}
+
+        file_id = changes.get("file_id") or existing.get("file_id", "")
         return {
             "ok": True,
             "storage_id": existing["storage_id"],
             "filename": existing.get("filename", filename),
+            "title": changes.get("title") or existing.get("title") or title,
+            "tags": changes.get("tags", list(existing.get("tags") or [])),
             "chars": len(text),
             "duplicate": True,
+            "metadata_updated": bool(changes),
+            "has_file": bool(file_id),
+            "file_id": file_id,
+            "content_type": changes.get("content_type") or existing.get("content_type", ""),
+            "bytes": changes.get("bytes") or existing.get("bytes", 0),
+            "file_error": file_error,
             "verified": True,
             "saved_at": existing.get("saved_at"),
             "error": "",
         }
 
     storage_id = _new_id()
+
+    # The original goes in first. If it fails the text is still stored, but the
+    # record must not claim a download it cannot serve, so file_id stays unset.
+    file_error = ""
+    file_info: dict[str, Any] = {}
+    if data:
+        stored = _store_bytes(data, filename, identity_id, content_type, storage_id)
+        if stored.get("ok"):
+            file_info = {
+                "file_id": stored["file_id"],
+                "content_type": stored["content_type"],
+                "bytes": stored["bytes"],
+                "file_sha256": stored["sha256"],
+            }
+        else:
+            file_error = stored.get("error", "")
+            logger.error(
+                "documents_store: text for %r stored but the original was not: %s",
+                filename, file_error,
+            )
+
     doc = {
         "storage_id": storage_id,
         "identity_id": identity_id,
         "filename": filename,
+        "title": title,
+        "tags": tag_list,
         "kind": kind,
         "source": source,
         "text": text,
@@ -127,14 +256,17 @@ def save(
         "content_sha256": digest,
         "saved_at": _now(),
         "meta": meta or {},
+        **file_info,
     }
 
     try:
         res = _coll().insert_one(doc)
         if not res.acknowledged:
+            _discard_orphan(file_info)
             return {"ok": False, "storage_id": "", "error": "the server did not acknowledge the write"}
     except Exception as exc:  # noqa: BLE001
         logger.error("documents_store: save failed for %r: %s", filename, exc)
+        _discard_orphan(file_info)
         return {"ok": False, "storage_id": "", "error": f"{type(exc).__name__}: {exc}"}
 
     # Verify rather than assume. An id handed back for a document that cannot be
@@ -142,28 +274,67 @@ def save(
     try:
         back = _coll().find_one({"storage_id": storage_id}, {"content_sha256": 1, "chars": 1})
         if not back:
+            _discard_orphan(file_info)
             return {"ok": False, "storage_id": "", "error": "saved document could not be read back"}
         if back.get("content_sha256") != digest:
+            _discard_orphan(file_info)
             return {"ok": False, "storage_id": "", "error": "read-back content hash did not match"}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "storage_id": "", "error": f"verification read failed: {exc}"}
 
-    _record_write(storage_id, filename, identity_id)
+    _record_write(storage_id, title, identity_id)
     logger.info(
-        "documents_store: saved %s as %s (%d chars, source=%s)",
-        filename, storage_id, len(text), source,
+        "documents_store: saved %r as %s (%d chars, source=%s, tags=%s)",
+        title, storage_id, len(text), source, tag_list or "none",
     )
     return {
         "ok": True,
         "storage_id": storage_id,
         "filename": filename,
+        "title": title,
+        "tags": tag_list,
         "chars": len(text),
         "truncated": truncated,
         "duplicate": False,
+        "has_file": bool(file_info),
+        "file_id": file_info.get("file_id", ""),
+        "content_type": file_info.get("content_type", ""),
+        "bytes": file_info.get("bytes", 0),
+        "file_error": file_error,
         "verified": True,
         "saved_at": doc["saved_at"],
         "error": "",
     }
+
+
+def _store_bytes(
+    data: bytes, filename: str, identity_id: str, content_type: str, storage_id: str
+) -> dict[str, Any]:
+    """Hand the original off to the file store, converting a crash into a result."""
+    try:
+        from falcon import file_store
+
+        return file_store.put(
+            data,
+            filename,
+            identity_id=identity_id,
+            content_type=content_type,
+            storage_id=storage_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "file_id": "", "error": f"{type(exc).__name__}: {exc}"}
+
+
+def _discard_orphan(file_info: dict) -> None:
+    """Delete bytes whose record never made it, so they cannot accumulate unreferenced."""
+    if not file_info.get("file_id"):
+        return
+    try:
+        from falcon import file_store
+
+        file_store.delete(file_info["file_id"])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("documents_store: orphaned file %s: %s", file_info["file_id"], exc)
 
 
 # ---------------------------------------------------------------------------
@@ -228,19 +399,23 @@ def list_documents(identity_id: str = "", limit: int = 50) -> list[dict]:
 
 
 def search(identity_id: str, query: str, limit: int = 20) -> list[dict]:
-    """Case-insensitive substring search over filename and text.
+    """Case-insensitive substring search over title, tags, filename and text.
 
     A regex scan rather than a text index: these collections are small, and a
     substring match is what someone means by "find my chapter about X" — a text
     index would stem and tokenise and miss exact phrases.
+
+    Tags are matched here too rather than through a separate tag command, so
+    "find my drafts" works whether "draft" is a tag or a word in the title.
     """
     query = (query or "").strip()
     if not query:
         return []
-    import re as _re
 
-    rx = _re.compile(_re.escape(query), _re.I)
-    q: dict = {"$or": [{"filename": rx}, {"text": rx}]}
+    rx = re.compile(re.escape(query), re.I)
+    # Mongo applies a regex to each element of an array field, so this matches a
+    # record whose *any* tag contains the term.
+    q: dict = {"$or": [{"title": rx}, {"tags": rx}, {"filename": rx}, {"text": rx}]}
     if identity_id:
         q["identity_id"] = identity_id
     return list(
@@ -248,15 +423,55 @@ def search(identity_id: str, query: str, limit: int = 20) -> list[dict]:
     )
 
 
+def get_file(storage_id: str, identity_id: str = "") -> dict | None:
+    """The original uploaded bytes for a stored document, ready to serve.
+
+    Returns None when the document does not exist, was stored as text only, or
+    its record points at bytes that are no longer there — the caller must treat
+    all three as "no download", never as an empty file.
+    """
+    doc = get(storage_id, identity_id)
+    if not doc or not doc.get("file_id"):
+        return None
+
+    from falcon import file_store
+
+    blob = file_store.get(doc["file_id"])
+    if not blob:
+        logger.error(
+            "documents_store: %s points at missing file %s", storage_id, doc["file_id"]
+        )
+        return None
+    # The record's filename is the one the user recognises; GridFS only ever saw
+    # whatever was passed at write time.
+    blob["filename"] = doc.get("filename") or blob["filename"]
+    blob["storage_id"] = storage_id
+    return blob
+
+
 def delete(storage_id: str, identity_id: str = "") -> bool:
-    """Remove one document. The only thing that deletes stored content."""
+    """Remove one document and its original file. The only thing that deletes stored content."""
     q: dict = {"storage_id": (storage_id or "").strip()}
     if identity_id:
         q["identity_id"] = identity_id
+
+    # Read the file id before the record goes, or the bytes become unreachable
+    # garbage that nothing points at.
+    doomed = _coll().find_one(q, {"file_id": 1})
     res = _coll().delete_one(q)
-    if res.deleted_count:
-        logger.info("documents_store: deleted %s", storage_id)
-    return res.deleted_count > 0
+    if not res.deleted_count:
+        return False
+
+    if doomed and doomed.get("file_id"):
+        try:
+            from falcon import file_store
+
+            file_store.delete(doomed["file_id"])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("documents_store: record deleted but file was not: %s", exc)
+
+    logger.info("documents_store: deleted %s", storage_id)
+    return True
 
 
 def stats(identity_id: str = "") -> dict:

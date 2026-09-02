@@ -73,6 +73,10 @@ export interface Identity {
 export interface DocAttachment {
   filename: string;
   text: string;
+  /** Where /documents/extract already stored it, so the model can cite the id. */
+  storage_id?: string;
+  /** Whether the original file was kept and can be offered as a download. */
+  has_file?: boolean;
 }
 
 /** Response from POST /documents/extract. */
@@ -81,6 +85,15 @@ export interface ExtractResult {
   chars: number;
   truncated: boolean;
   text: string;
+  /** Whether the text was durably stored (needs identity_id on the upload). */
+  saved: boolean;
+  storage_id: string;
+  save_error: string;
+  /** True when the ORIGINAL file was kept, not just its extracted text. */
+  has_file: boolean;
+  /** Path to the original, downloadable byte-for-byte. Empty if none was kept. */
+  download_url: string;
+  bytes: number;
 }
 
 // ── Voice / text-to-speech (ElevenLabs) ─────────────────────────────────────
@@ -322,6 +335,25 @@ export interface WatcherAgent {
   code: string | null;
   revision: number | null;
   created_at: string | null;
+  /** When to reach for this tool — the same text the model is given. */
+  use_when?: string;
+  /** What the payload should contain. Empty for tools that take none. */
+  payload_hint?: string;
+  /** A working payload, used to prefill the run box. */
+  example?: string;
+  /** True when running it destroys something. The UI asks twice. */
+  destructive?: boolean;
+}
+
+/** One direct run of a tool from the Watcher Agents tab. */
+export interface WatcherAgentRun {
+  agent: string;
+  identity_id: string;
+  run_id: string;
+  payload: string;
+  result: string;
+  latency_ms: number;
+  error: boolean;
 }
 
 /** The watcher persona: two authored halves around a derived command list. */

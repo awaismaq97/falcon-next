@@ -66,7 +66,21 @@ DEFAULT_RULES = (
     "run persistent_memory_access_bridge and seen it report success. Report what the "
     "bridge actually returns. If it reports a failure, say storage is not working; if "
     "you have not run it, say the status is unverified. An assumed memory claim is the "
-    "one failure the user cannot detect for themselves."
+    "one failure the user cannot detect for themselves.\n"
+    "- Saving text means running library_store and quoting the storage id it returns. "
+    "Nothing you merely read stays available to you later, so if the user asks you to "
+    "keep, save or remember something, store it before you say you have.\n"
+    "- Never paste a document's text into a command payload. Uploaded files are already "
+    "stored and carry a storage id; commands take ids, not contents. A payload containing "
+    "a whole document is always a mistake, and the user sees every character of it.\n"
+    "- Never print a document's contents back to the user just because you have them. "
+    "They uploaded that file; they do not need it read aloud. Answer the question, quote "
+    "only the passages that matter, and when they want the document itself give them its "
+    "download link. Reproduce a document in full only if asked to.\n"
+    "- Deleting a stored document is permanent and cannot be undone. Run delete_doc only "
+    "when the user has asked for that particular document to be removed, never on your own "
+    "initiative and never to tidy up or replace something. If you are not certain which "
+    "document they mean, ask before deleting rather than after."
 )
 
 # Hand-written descriptions for built-in tools. A tool absent from this map —
@@ -125,22 +139,77 @@ BUILTIN_DESCRIPTIONS: dict[str, dict] = {
         "payload": "none.",
         "example": "",
     },
+    "library_store": {
+        "use_when": (
+            "you need to keep text that exists only in this conversation — notes you "
+            "wrote, a draft, research findings, something the user typed and wants kept. "
+            "It writes to the external database, reads the write back to verify it, and "
+            "returns a permanent storage id. Report that id; if it returns NOT STORED, "
+            "say the text was not saved rather than implying it was.\n"
+            "NOT for uploaded files. An attached document is already saved the moment it "
+            "is uploaded and its envelope states its storage id — if the user says 'save "
+            "this doc', tell them it is already stored and give the id. Never copy a "
+            "document's text into this command: it would store a second copy and print "
+            "the whole file into the chat on the way."
+        ),
+        "payload": (
+            "a Title line, an optional Tags line, then a line of dashes, then the full "
+            "body text. Tags are comma-separated. With no headers the whole payload is "
+            "stored and the first line becomes the title."
+        ),
+        "example": (
+            "Title: Chapter Three — The Descent\n"
+            "Tags: manuscript, draft, act-two\n"
+            "---\n"
+            "The lift had not moved in eleven years, which was why she chose it..."
+        ),
+    },
     "list_documents": {
         "use_when": (
-            "user refers to a document, manuscript, outline or file they uploaded "
-            "earlier — check what is actually stored before answering. Uploads are "
-            "saved with a storage id; this lists them."
+            "user refers to a document, manuscript, outline, note or file from earlier — "
+            "check what is actually stored before answering. Lists storage ids, titles "
+            "and tags for everything uploaded or saved with library_store. Search by a "
+            "term to match titles, tags or body text."
         ),
-        "payload": "empty to list recent documents, or a search term.",
+        "payload": "empty to list everything recent, or a search term or tag.",
         "example": "chapter three",
     },
     "read_document": {
         "use_when": (
-            "you need the contents of a previously uploaded document. Get its id from "
-            "list_documents first. This is how you recall a manuscript from an earlier "
-            "session — do not claim to remember its contents without reading it back."
+            "the user wants a stored document back, or you need what is in it. Get the id "
+            "from list_documents first.\n"
+            "An uploaded file (PDF, Word, spreadsheet) comes back as a download link plus its "
+            "opening lines. Pass the link straight through — the file is what they uploaded "
+            "and what they want back, and nobody wants a PDF retyped into a chat window. Add "
+            "'full' after the id ONLY when you must analyse, search or quote the contents to "
+            "answer something, and even then answer from it rather than reprinting it.\n"
+            "Free text saved with library_store has no file to hand over, so it comes back "
+            "whole and needs no 'full'.\n"
+            "This is also how you recall something from an earlier session: read it back "
+            "rather than claiming to remember it."
         ),
-        "payload": "the storage id.",
+        "payload": (
+            "the storage id; add 'full' only to pull the entire text of an uploaded file."
+        ),
+        "example": "doc_a1b2c3d4e5f6",
+    },
+    "delete_doc": {
+        "use_when": (
+            "the user asks you to delete, remove or get rid of a stored document. It "
+            "erases the record, the original file and the list_documents entry, and there "
+            "is no undo — so run it only when the user has actually asked for that "
+            "specific document to go. Never delete to tidy up, to make room, to replace a "
+            "document with a newer version, or because something looks like a duplicate.\n"
+            "Take the id from list_documents and make sure it is the one they mean; if "
+            "more than one document could match what they said, ask which before deleting. "
+            "It reports back the title of what it removed — quote that, so the user can "
+            "see the right thing went. If it reports NOT DELETED or FAILED, say the "
+            "document is still stored."
+        ),
+        "payload": (
+            "the storage id to delete. Ids only — never a title, a filename or a word "
+            "like 'all'. Several ids separated by spaces delete several documents."
+        ),
         "example": "doc_a1b2c3d4e5f6",
     },
     "spawn_agent": {

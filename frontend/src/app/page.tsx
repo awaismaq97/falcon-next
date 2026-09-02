@@ -15,6 +15,7 @@ import { ContextTab } from "@/components/tabs/ContextTab";
 import { MemoryTab } from "@/components/tabs/MemoryTab";
 import { AuditTab } from "@/components/tabs/AuditTab";
 import { LogsTab } from "@/components/tabs/LogsTab";
+import { AgentsTab } from "@/components/tabs/AgentsTab";
 import { TestingTab } from "@/components/tabs/TestingTab";
 import { DualRunTab } from "@/components/tabs/DualRunTab";
 import { PolyMarketTab } from "@/components/tabs/PolyMarketTab";
@@ -28,6 +29,7 @@ const ALL_TABS = [
   { id: "categories",  label: "Categories" },
   { id: "audit",       label: "Audit" },
   { id: "logs",        label: "Logs" },
+  { id: "agents",      label: "Watcher Agents" },
   { id: "testing",     label: "Testing" },
   { id: "dualrun",     label: "Dual Run" },
   { id: "polymarket",  label: "Poly Market" },
@@ -203,6 +205,9 @@ export default function Home() {
             </Tabs.Content>
             <Tabs.Content value="logs" className="h-full overflow-hidden data-[state=inactive]:hidden">
               <LogsTab />
+            </Tabs.Content>
+            <Tabs.Content value="agents" className="h-full overflow-hidden data-[state=inactive]:hidden">
+              <AgentsTab />
             </Tabs.Content>
             <Tabs.Content value="testing" className="h-full overflow-y-auto data-[state=inactive]:hidden">
               <TestingTab />

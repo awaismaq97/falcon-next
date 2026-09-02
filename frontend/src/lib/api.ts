@@ -150,9 +150,14 @@ export const api = {
   // ── Documents ─────────────────────────────────────────────────────────────
   // Multipart upload → extracted text. No JSON Content-Type (the browser sets
   // the multipart boundary itself).
-  extractDocument: async (file: File): Promise<ExtractResult> => {
+  //
+  // identityId is what lets the backend keep the ORIGINAL file, not just the
+  // text pulled out of it. Without it the text is still saved on send, but there
+  // is no PDF to hand back later — so always pass it.
+  extractDocument: async (file: File, identityId?: string): Promise<ExtractResult> => {
     const fd = new FormData();
     fd.append("file", file);
+    if (identityId) fd.append("identity_id", identityId);
     let res: Response;
     try {
       res = await fetch(url("/api/documents/extract"), {
@@ -437,5 +442,19 @@ export const api = {
     req<{ deleted: string; tools: string[] }>(
       `/api/watcher/agents/${encodeURIComponent(name)}`,
       { method: "DELETE", headers: getAuthHeaders() },
+    ),
+
+  // Runs the tool synchronously on the server, so the leash has to cover the
+  // slowest of them — spawn_agent makes two model calls, http_get waits on
+  // someone else's server. Abandoning the request would not stop the tool.
+  runWatcherAgent: (name: string, body: { payload: string; identity_id: string }) =>
+    req<import("./types").WatcherAgentRun>(
+      `/api/watcher/agents/${encodeURIComponent(name)}/run`,
+      {
+        method: "POST",
+        headers: getAuthHeaders(),
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(120_000),
+      },
     ),
 };

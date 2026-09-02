@@ -49,7 +49,23 @@ DEFAULT_FEATURES: dict[str, bool] = {
     "kalshi": True,
     "voice": True,
     "watcher": False,   # opt-in — admin must explicitly enable per user
+    # The Watcher Agents tab, which runs a tool directly rather than through the
+    # assistant. Opt-in for the same reason as watcher: the tools it exposes act
+    # on the outside world (fetch a URL, stage a tweet, delete a document), and
+    # from that tab there is no model in between deciding whether to run them.
+    "agents": False,
 }
+
+
+def merge_features(features: dict | None) -> dict[str, bool]:
+    """A user's stored flags laid over the shipped defaults.
+
+    A feature added after an account was created is absent from that account's
+    stored dict, and absent has to mean "the default" rather than "unset" — for
+    an opt-in feature like ``agents`` the difference decides whether every
+    existing user sees a tab the admin never granted them.
+    """
+    return {**DEFAULT_FEATURES, **{k: bool(v) for k, v in (features or {}).items()}}
 
 
 def _utc_now() -> str:
@@ -69,6 +85,10 @@ def _serialize(doc: dict) -> dict:
         out["username"] = "<encrypted>"
     out.pop("username_enc", None)
     out.pop("password_hash", None)  # never return the hash
+    # Every flag, defaults included, so the UI can render a checkbox per feature
+    # rather than only for the ones this account happens to have stored.
+    if "features" in out or doc.get("role") != "admin":
+        out["features"] = merge_features(doc.get("features"))
     # Ensure watcher_enabled is always present so the frontend doesn't need a null check
     out.setdefault("watcher_enabled", False)
     return out

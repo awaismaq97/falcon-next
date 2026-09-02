@@ -211,17 +211,66 @@ def _search_ddg(query: str, limit: int) -> list[dict]:
     return out
 
 
+def _search_with(provider: str, query: str, limit: int) -> list[dict]:
+    if provider == "tavily":
+        return _search_tavily(query, limit)
+    if provider == "brave":
+        return _search_brave(query, limit)
+    return _search_ddg(query, limit)
+
+
+def _provider_chain() -> list[str]:
+    """Every provider that could answer, best first.
+
+    DuckDuckGo is always last and always present: it needs no key, so there is
+    no configuration under which a job has nothing left to try.
+    """
+    chain = []
+    if _provider_key("TAVILY_API_KEY"):
+        chain.append("tavily")
+    if _provider_key("BRAVE_API_KEY"):
+        chain.append("brave")
+    chain.append("duckduckgo-lite")
+    return chain
+
+
 def _search(query: str, limit: int = _RESULTS_PER_SEARCH) -> list[dict]:
-    provider = search_provider()
-    try:
-        if provider == "tavily":
-            return _search_tavily(query, limit)
-        if provider == "brave":
-            return _search_brave(query, limit)
-        return _search_ddg(query, limit)
-    except Exception as exc:  # noqa: BLE001 — a dead provider must not kill the job
-        logger.warning("research: search via %s failed for %r: %s", provider, query[:60], exc)
-        return []
+    """Search, falling through to the next provider when one lets us down.
+
+    A single provider is a single point of failure for the whole job, and the
+    failure is silent in the worst way: the round finds no pages, every later
+    round has nothing to build on, and the finished report says no findings
+    could be gathered — as if the question had no answers, rather than that one
+    HTTP request timed out. Tavily being slow for thirty seconds should not
+    decide the outcome when an unauthenticated fallback is sitting right there.
+
+    A provider that answers with an empty list is treated the same as one that
+    raised: it did not help, so try the next.
+    """
+    attempted: list[str] = []
+    for provider in _provider_chain():
+        try:
+            results = _search_with(provider, query, limit)
+        except Exception as exc:  # noqa: BLE001 — a dead provider must not kill the job
+            logger.warning("research: search via %s failed for %r: %s", provider, query[:60], exc)
+            attempted.append(f"{provider} ({type(exc).__name__})")
+            continue
+
+        if results:
+            if attempted:
+                logger.info(
+                    "research: %s returned %d results for %r after %s",
+                    provider, len(results), query[:60], ", ".join(attempted),
+                )
+            return results
+
+        logger.info("research: %s returned nothing for %r", provider, query[:60])
+        attempted.append(f"{provider} (empty)")
+
+    logger.warning(
+        "research: every provider failed for %r — tried %s", query[:60], ", ".join(attempted),
+    )
+    return []
 
 
 # ── Fetch + text extraction ────────────────────────────────────────────────
@@ -492,9 +541,11 @@ def _write_report(job: dict) -> str:
     findings = job.get("findings") or []
     if not findings:
         return (
-            "No usable findings were gathered for this question. This usually means the search "
-            "provider returned nothing (check the provider credentials) or the pages found could "
-            "not be fetched."
+            "No usable findings were gathered for this question. Every configured search "
+            "provider was tried and none returned results, or the pages they returned could "
+            "not be fetched — check the provider credentials and whether this server can "
+            "reach the internet. The server log names each provider it tried and why it "
+            "gave up."
         )
     listed = "\n".join(f"- [{f['url']}] {f['note']}" for f in findings)
     return _chat(

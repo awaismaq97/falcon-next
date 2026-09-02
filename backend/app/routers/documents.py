@@ -6,10 +6,16 @@ The chat send flow is JSON (base64 for images), so documents follow the same
 a file here, we extract plain text, and it POSTs that text back with the next
 message (which the send flow injects into the model payload).
 
-Raw binaries are never stored, but the extracted text now is: the chat send flow
-writes every attachment to falcon.documents_store and records its storage id, so
-a manuscript uploaded today is readable in a session next week. Passing
-identity_id here stores it at upload time as well. Before this existed the text
+Both halves of an upload are kept. The extracted text goes to
+falcon.documents_store, because that is what the model can actually read; the
+original bytes go to falcon.file_store (GridFS), because extracted text is not
+the document — a PDF's layout, figures and pagination do not survive extraction,
+and someone asking for their PDF back wants the PDF. /stored/{id}/download
+returns the file exactly as uploaded.
+
+Storing the original needs identity_id, which the browser sends with the upload.
+Without it the chat send flow still saves the text a moment later, so nothing is
+lost — but there is no file to download. Before any of this existed the text
 survived exactly one turn, which is why documents appeared to vanish between
 messages.
 
@@ -22,7 +28,7 @@ from __future__ import annotations
 import io
 import logging
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile
 
 logger = logging.getLogger("falcon.documents")
 
@@ -161,6 +167,53 @@ async def get_stored(storage_id: str, identity_id: str = "") -> dict:
     return doc
 
 
+@router.get("/stored/{storage_id}/download")
+async def download_stored(storage_id: str, identity_id: str = "", inline: bool = False):
+    """The original uploaded file, byte for byte.
+
+    This is the upload itself — the PDF with its layout, figures and pagination
+    intact — not the text extracted from it. ``inline=true`` asks the browser to
+    display it (a PDF opens in the viewer) instead of saving it.
+    """
+    from urllib.parse import quote
+
+    from falcon import documents_store as Store
+
+    blob = Store.get_file(storage_id, identity_id)
+    if not blob:
+        doc = Store.get(storage_id, identity_id)
+        if not doc:
+            raise HTTPException(status_code=404, detail=f"No stored document {storage_id!r}.")
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"{doc.get('filename', storage_id)!r} was stored as text only — there is no "
+                "original file to download. Documents uploaded before file storage was added "
+                "kept their extracted text but not the file itself."
+            ),
+        )
+
+    name = blob["filename"]
+    disposition = "inline" if inline else "attachment"
+    # RFC 5987: an ASCII fallback for old clients plus a UTF-8 form, so a
+    # filename with an accent or a dash does not corrupt the header.
+    ascii_name = name.encode("ascii", "replace").decode().replace('"', "'")
+    return Response(
+        content=blob["data"],
+        media_type=blob["content_type"],
+        headers={
+            "Content-Disposition": (
+                f"{disposition}; filename=\"{ascii_name}\"; "
+                f"filename*=UTF-8''{quote(name, safe='')}"
+            ),
+            "Content-Length": str(blob["bytes"]),
+            # These are user uploads behind an identity check; never let a shared
+            # cache hold onto one.
+            "Cache-Control": "private, max-age=0, no-store",
+        },
+    )
+
+
 @router.delete("/stored/{storage_id}")
 async def delete_stored(storage_id: str, identity_id: str = "") -> dict:
     """Delete one stored document. The only thing that removes stored content."""
@@ -211,18 +264,43 @@ async def extract_document(
         "saved": False,
         "storage_id": "",
         "save_error": "",
+        # True once the original file is stored and downloadable, not merely the
+        # text pulled out of it.
+        "has_file": False,
+        "download_url": "",
+        "bytes": len(data),
     }
 
     if identity_id.strip():
         from falcon import documents_store as Store
 
         try:
-            saved = Store.save(identity_id.strip(), name, text, source="upload")
+            saved = Store.save(
+                identity_id.strip(),
+                name,
+                text,
+                source="upload",
+                # The original, kept as uploaded, so the file can be handed back
+                # as a file instead of as its extracted text.
+                data=data,
+                content_type=file.content_type or "",
+            )
             result["saved"] = saved["ok"]
             result["storage_id"] = saved.get("storage_id", "")
-            result["save_error"] = saved.get("error", "")
+            result["save_error"] = saved.get("error", "") or saved.get("file_error", "")
+            result["has_file"] = bool(saved.get("has_file"))
+            if saved.get("has_file"):
+                result["download_url"] = (
+                    f"/api/documents/stored/{saved['storage_id']}/download"
+                    f"?identity_id={identity_id.strip()}"
+                )
             if not saved["ok"]:
                 logger.error("document %r was NOT saved: %s", name, saved.get("error"))
+            elif saved.get("file_error"):
+                logger.error(
+                    "document %r: text saved but the original file was not: %s",
+                    name, saved["file_error"],
+                )
         except Exception as exc:  # noqa: BLE001
             # Extraction succeeded, so the turn can still proceed — but never
             # report a save that did not happen.

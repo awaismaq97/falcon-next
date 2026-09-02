@@ -238,24 +238,29 @@ def check() -> dict:
 
 def format_report(res: dict) -> str:
     """Render a check() result as text for the chat, stating the verdict plainly."""
+    # Rendered as markdown in the chat, so consecutive plain lines would collapse
+    # into one paragraph. Bullets and a table keep the report readable there and
+    # still legible as plain text anywhere else.
     lines: list[str] = []
     verdict = "OPERATIONAL" if res["ok"] else f"FAILED at step '{res['failed_step']}'"
     lines.append(f"MEMORY BRIDGE: {verdict}")
     lines.append("")
-    lines.append(f"Database   : {res['database']}")
-    lines.append(f"Collection : {res['collection']}")
-    lines.append(f"Process    : {res['boot_id']}")
-    lines.append(f"Total      : {res.get('total_ms', 0)} ms")
+    lines.append(f"- **Database:** {res['database']}")
+    lines.append(f"- **Collection:** {res['collection']}")
+    lines.append(f"- **Process:** {res['boot_id']}")
+    lines.append(f"- **Total:** {res.get('total_ms', 0)} ms")
     lines.append("")
+    lines.append("| Step | Result | Time | Detail |")
+    lines.append("| --- | --- | --- | --- |")
 
     for step in res["steps"]:
-        mark = "OK  " if step["ok"] else "FAIL"
-        detail = f"  {step['detail']}" if step["detail"] else ""
-        lines.append(f"  [{mark}] {step['step']:<11} {step['ms']:>7} ms{detail}")
+        mark = "OK" if step["ok"] else "**FAIL**"
+        detail = (step["detail"] or "—").replace("|", "\\|")
+        lines.append(f"| {step['step']} | {mark} | {step['ms']} ms | {detail} |")
 
     if not res["ok"]:
         lines.append("")
-        lines.append(f"Error: {res['error']}")
+        lines.append(f"**Error:** {res['error']}")
         lines.append("")
         lines.append(
             "Storage is NOT confirmed working. Do not claim anything was remembered, "
@@ -269,13 +274,13 @@ def format_report(res: dict) -> str:
         oldest = dur.get("oldest_probe_at")
         when = oldest.strftime("%Y-%m-%d %H:%M UTC") if hasattr(oldest, "strftime") else str(oldest)
         lines.append(
-            f"PERSISTENCE CONFIRMED — {dur['probes_from_earlier_processes']} probe(s) written by "
+            f"**PERSISTENCE CONFIRMED** — {dur['probes_from_earlier_processes']} probe(s) written by "
             f"{dur['earlier_boots']} earlier process(es) are still readable, the oldest from "
             f"{when}. Data survives restarts and redeploys, not merely this session."
         )
     else:
         lines.append(
-            "READ/WRITE CONFIRMED, PERSISTENCE NOT YET PROVEN — this is the first process to "
+            "**READ/WRITE CONFIRMED, PERSISTENCE NOT YET PROVEN** — this is the first process to "
             "write a probe, so there is nothing from an earlier run to verify against. Run this "
             "again after a restart and it will report on durability properly."
         )

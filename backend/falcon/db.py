@@ -229,7 +229,13 @@ _INDEX_SPECS: list[tuple[str, object, dict]] = [
     ("stored_documents", "storage_id", {"unique": True}),
     ("stored_documents", [("identity_id", 1), ("saved_at", -1)], {}),
     ("stored_documents", [("identity_id", 1), ("content_sha256", 1)], {}),
+    # Multikey index over the tags array, backing tag lookups from library_store
+    # entries. Titles are matched by regex alongside body text, which no index
+    # helps with at these collection sizes.
+    ("stored_documents", [("identity_id", 1), ("tags", 1)], {}),
 ]
+# Lumen Guard needs no index: it keeps two documents in lumen_state, both
+# addressed by _id.
 
 
 def _ensure_indexes_async(db: Database) -> None:

@@ -9,6 +9,7 @@ Routes:
   POST   /watcher/persona/reset             — restore shipped defaults (admin)
   GET    /watcher/agents                    — tools annotated builtin/generated
   POST   /watcher/agents                    — create an agent (name + purpose)
+  POST   /watcher/agents/{name}/run         — run one tool directly (agents feature)
   DELETE /watcher/agents/{name}             — delete a spawned agent
   GET    /watcher/debug                     — live vs persisted tool registry (admin)
   GET    /watcher/log                       — global invocation log (admin)
@@ -29,6 +30,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
+from datetime import datetime, timezone
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -74,6 +78,43 @@ def _require_admin(creds: HTTPAuthorizationCredentials = Depends(_bearer)) -> di
     return payload
 
 
+def _require_agents_feature(auth: dict = Depends(_require_any)) -> dict:
+    """Allow only accounts the admin has given the ``agents`` feature.
+
+    Read from the database on every call rather than from the JWT: features are
+    not in the token, and a token issued before the admin revoked the feature
+    would otherwise keep working for its full lifetime. Hiding the tab in the
+    frontend is presentation; this is the part that actually stops a run.
+    """
+    if auth.get("role") == "admin":
+        return auth
+
+    user = AdminUsers.get_portal_user_by_id(str(auth.get("sub") or ""))
+    if not user or not (user.get("features") or {}).get("agents", False):
+        raise HTTPException(
+            403,
+            "Running agents directly is not enabled for this account. "
+            "Ask an administrator to turn on the Watcher Agents feature.",
+        )
+    return auth
+
+
+def _resolve_identity(auth: dict, requested: str) -> str:
+    """Whose data a manual run acts on.
+
+    Portal users are pinned to their own identity — the tools reach per-identity
+    storage, so an unchecked identity_id in the body would be a way to read and
+    delete another user's documents.
+    """
+    own = (auth.get("identity_id") or "default").strip()
+    asked = (requested or "").strip()
+    if auth.get("role") == "admin":
+        return asked or own
+    if asked and asked != own:
+        raise HTTPException(403, "You can only run agents against your own identity.")
+    return own
+
+
 # ---------------------------------------------------------------------------
 # Pydantic schemas
 # ---------------------------------------------------------------------------
@@ -111,6 +152,16 @@ class AgentCreateRequest(BaseModel):
     """
     purpose: str
     name: str = ""
+
+
+class AgentRunRequest(BaseModel):
+    """Body for POST /watcher/agents/{name}/run — the Watcher Agents tab.
+
+    ``identity_id`` is honoured only for admins; a portal user is pinned to
+    their own identity regardless of what they send. See ``_resolve_identity``.
+    """
+    payload: str = ""
+    identity_id: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -188,14 +239,21 @@ def reset_persona(auth: dict = Depends(_require_admin)) -> dict:
 
 @router.get("/watcher/agents")
 def list_agents(auth: dict = Depends(_require_any)) -> dict:
-    """Every registered tool, annotated so the UI can show and manage them.
+    """Every registered tool, annotated so the UI can show, run and manage them.
 
     ``kind`` is "generated" for tools spawned at runtime (they live in the
     ``watcher_generated_tools`` collection and carry their source) and "builtin"
     for those defined in watcher_tools.py. Only generated tools are deletable —
     a built-in would simply reappear on the next process start.
+
+    ``use_when``, ``payload_hint`` and ``example`` come from the same map that
+    describes each tool to the model, rather than from a second set of texts
+    written for the UI. One source means the person pressing Run and the model
+    emitting a command are working from the same description of what the tool
+    takes — and a tool spawned at runtime gets a description here for free.
     """
     import falcon.watcher_generated as Generated
+    import falcon.watcher_persona as Persona
 
     stored = {d["name"]: d for d in Generated.list_all()}
     agents = []
@@ -207,6 +265,8 @@ def list_agents(auth: dict = Depends(_require_any)) -> dict:
         summary = (doc or {}).get("context") or ""
         if not summary and handler and handler.__doc__:
             summary = handler.__doc__.strip().split("\n", 1)[0]
+
+        described = Persona.BUILTIN_DESCRIPTIONS.get(name, {})
         agents.append({
             "name": name,
             "kind": "generated" if doc else "builtin",
@@ -215,9 +275,92 @@ def list_agents(auth: dict = Depends(_require_any)) -> dict:
             "code": (doc or {}).get("code"),
             "revision": (doc or {}).get("revision"),
             "created_at": (doc or {}).get("created_at"),
+            "use_when": described.get("use_when", ""),
+            "payload_hint": described.get("payload", ""),
+            "example": described.get("example", ""),
+            "destructive": name in WatcherTools.DESTRUCTIVE_TOOLS,
         })
 
     return {"agents": agents, "count": len(agents)}
+
+
+@router.post("/watcher/agents/{name}/run")
+def run_agent(
+    name: str,
+    body: AgentRunRequest,
+    auth: dict = Depends(_require_agents_feature),
+) -> dict:
+    """Run one tool directly and return what it returned.
+
+    The same dispatch the watcher performs, minus the model: no marker is
+    parsed, no message is scanned, and the result is handed back to the caller
+    instead of being injected into the conversation. That makes this the way to
+    use a tool deliberately — and the way to find out whether a tool works
+    without having to talk the assistant into emitting a command.
+
+    Runs in FastAPI's threadpool (a plain ``def``) because dispatch blocks: a
+    fetch, a database round-trip or a model call inside a tool would otherwise
+    stall the event loop for every other request.
+    """
+    key = name.lower().strip()
+    if key not in WatcherTools.list_tools():
+        raise HTTPException(404, f"No agent named '{key}'.")
+
+    identity_id = _resolve_identity(auth, body.identity_id)
+    payload = body.payload or ""
+    actor = auth.get("username") or identity_id
+
+    # Tools that own per-identity state read this, exactly as they do under the
+    # watcher. The run id stands in for the message id a dispatched command
+    # would carry, so a staged tweet records where it came from and the log row
+    # can be told apart from one the watcher produced.
+    run_id = f"manual-{uuid4().hex[:12]}"
+    WatcherTools.set_current_identity(identity_id, run_id)
+    t0 = time.monotonic()
+    try:
+        result = WatcherTools.dispatch(key, payload)
+    finally:
+        # Threadpool workers are reused, so leaving the identity set would hand
+        # the next request whatever this one was acting for.
+        WatcherTools.set_current_identity("", "")
+
+    latency_ms = round((time.monotonic() - t0) * 1000)
+    error = result.startswith("[ERROR]") or result.startswith("[NOT CONFIGURED]")
+
+    # Written to the same log the watcher writes to, so the Logs tab shows every
+    # tool run in one place. ``source`` is what says a human pressed Run.
+    try:
+        get_db()["watcher_log"].insert_one({
+            "identity_id": identity_id,
+            "msg_id": run_id,
+            "command": key,
+            "payload": payload[:500],
+            "result": result[:2000],
+            "latency_ms": latency_ms,
+            "error": error,
+            "recorded_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "source": "manual",
+            "actor": actor,
+        })
+    except Exception as log_exc:  # noqa: BLE001
+        # The tool has already run; failing the request now would tell the
+        # caller nothing happened when something did.
+        logger.warning("watcher: could not log manual run of %r: %s", key, log_exc)
+
+    logger.info(
+        "watcher: %r run manually by %r for identity=%r latency=%dms error=%s",
+        key, actor, identity_id, latency_ms, error,
+    )
+
+    return {
+        "agent": key,
+        "identity_id": identity_id,
+        "run_id": run_id,
+        "payload": payload,
+        "result": result,
+        "latency_ms": latency_ms,
+        "error": error,
+    }
 
 
 @router.post("/watcher/agents", status_code=201)

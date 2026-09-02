@@ -1,16 +1,17 @@
 "use client";
 
 import { useState } from "react";
-import { Users, ScrollText, LogOut, Shield, X, Bot } from "lucide-react";
+import { Users, ScrollText, LogOut, Shield, X, Bot, Radar } from "lucide-react";
 import { useAuth } from "@/lib/authStore";
 import { cn } from "@/lib/utils";
 import { UsersTab } from "./UsersTab";
 import { AuditLogTab } from "./AuditLogTab";
+import { LumenGuardTab } from "./LumenGuardTab";
 import { adminApi } from "@/lib/adminApi";
 import { useWatcherStatus, qk } from "@/lib/queries";
 import { useQueryClient } from "@tanstack/react-query";
 
-type AdminTab = "users" | "audit" | "watcher";
+type AdminTab = "users" | "audit" | "watcher" | "lumen";
 
 interface AdminPanelProps {
   onClose: () => void;
@@ -147,6 +148,7 @@ export function AdminPanel({ onClose }: AdminPanelProps) {
   const [activeTab, setActiveTab] = useState<AdminTab>("users");
   const { user, logout } = useAuth();
   const [confirmLogout, setConfirmLogout] = useState(false);
+  const isAdmin = user?.role === "admin";
 
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 backdrop-blur-sm">
@@ -194,6 +196,12 @@ export function AdminPanel({ onClose }: AdminPanelProps) {
           <TabButton active={activeTab === "users"} onClick={() => setActiveTab("users")} icon={<Users className="h-4 w-4" />} label="Users" />
           <TabButton active={activeTab === "audit"} onClick={() => setActiveTab("audit")} icon={<ScrollText className="h-4 w-4" />} label="Audit Log" />
           <TabButton active={activeTab === "watcher"} onClick={() => setActiveTab("watcher")} icon={<Bot className="h-4 w-4" />} label="Watcher" />
+          {/* Lumen Guard is admin-only. The server enforces that on every route;
+              this keeps the tab from even appearing for anyone else, since its
+              findings name generated tools, admin accounts and identity ids. */}
+          {isAdmin && (
+            <TabButton active={activeTab === "lumen"} onClick={() => setActiveTab("lumen")} icon={<Radar className="h-4 w-4" />} label="Lumen Guard" />
+          )}
         </div>
 
         {/* ── Content ── */}
@@ -201,6 +209,7 @@ export function AdminPanel({ onClose }: AdminPanelProps) {
           {activeTab === "users" && <UsersTab />}
           {activeTab === "audit" && <AuditLogTab />}
           {activeTab === "watcher" && <AdminWatcherTab />}
+          {activeTab === "lumen" && isAdmin && <LumenGuardTab />}
         </div>
       </div>
     </div>

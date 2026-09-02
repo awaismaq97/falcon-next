@@ -130,6 +130,17 @@ async def lifespan(app: FastAPI):
         except Exception as backup_exc:
             logger.warning("Backup scheduler not started: %s", backup_exc)
 
+        # Lumen Guard — the health monitor. Started last, after the subsystems
+        # it checks, so its first run sees a settled system rather than
+        # reporting half of startup as down. Never fatal: a system running
+        # unmonitored is bad, a system that will not boot is worse.
+        try:
+            from falcon.lumen_guard import start_monitor
+
+            start_monitor()
+        except Exception as lumen_exc:
+            logger.warning("Lumen Guard not started: %s", lumen_exc)
+
     except Exception as exc:  # noqa: BLE001
         logger.warning("MongoDB warmup skipped (will retry lazily): %s", exc)
     yield
@@ -148,6 +159,11 @@ async def lifespan(app: FastAPI):
     try:
         from falcon.backup import stop_scheduler as stop_backup_scheduler
         stop_backup_scheduler()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from falcon.lumen_guard import stop_monitor
+        stop_monitor()
     except Exception:  # noqa: BLE001
         pass
     try:
@@ -214,6 +230,7 @@ def create_app() -> FastAPI:
         documents,
         dual_run,
         identities,
+        lumen,
         memory,
         testing,
         traces,
@@ -235,6 +252,7 @@ def create_app() -> FastAPI:
     app.include_router(documents.router, prefix=prefix)
     app.include_router(categories_router.router, prefix=prefix)
     app.include_router(watcher_router.router, prefix=prefix)
+    app.include_router(lumen.router, prefix=prefix)
 
     return app
 

@@ -18,6 +18,7 @@ export const ALL_FEATURES = [
   "kalshi",
   "voice",
   "watcher",
+  "agents",
 ] as const;
 
 export type FeatureKey = (typeof ALL_FEATURES)[number];
@@ -132,4 +133,43 @@ export const adminApi = {
     adminReq<{ records: AdminAuditRecord[] }>(
       `/api/admin/audit?limit=${limit}`
     ).then((r) => r.records),
+};
+
+// ---------------------------------------------------------------------------
+// Lumen Guard — system health. Admin-only on the server; there is no
+// portal-user variant of any of these calls by design.
+// ---------------------------------------------------------------------------
+
+export type LumenHealth = "ok" | "warn" | "down";
+
+export interface LumenCheck {
+  name: string;
+  state: LumenHealth;
+  message: string;
+  facts: Record<string, unknown>;
+}
+
+export interface LumenReport {
+  overall: LumenHealth;
+  checked_at: string;
+  duration_ms: number;
+  pid: number;
+  checks: LumenCheck[];
+  counts: Record<LumenHealth, number>;
+}
+
+export interface LumenState {
+  enabled: boolean;
+  running: boolean;
+  interval_seconds: number;
+  pid: number;
+  checks: string[];
+  last: LumenReport | null;
+}
+
+export const lumenApi = {
+  status: () => adminReq<LumenState>("/api/admin/lumen/status"),
+  check: () => adminReq<LumenReport>("/api/admin/lumen/check", { method: "POST" }),
+  start: () => adminReq<LumenState>("/api/admin/lumen/start", { method: "POST" }),
+  stop: () => adminReq<LumenState>("/api/admin/lumen/stop", { method: "POST" }),
 };

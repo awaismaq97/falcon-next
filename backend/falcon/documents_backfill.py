@@ -47,6 +47,12 @@ _ENVELOPE = re.compile(
     re.S,
 )
 
+# Newer envelopes carry a bracketed note after the header telling the model the
+# file is already stored. It is instruction, not document, so it is stripped
+# before the text is saved — otherwise a recovered manuscript would begin with a
+# sentence the author never wrote.
+_STORED_NOTE = re.compile(r"\A\[Already saved permanently as [^\]]*\]\n?", re.S)
+
 
 def _iter_payload_text(record: dict):
     """Yield every user-authored string in one audit record's payload."""
@@ -89,7 +95,7 @@ def scan(identity_id: str = "", limit: int = 0) -> list[dict]:
                 continue  # cheap guard before the expensive regex
             for m in _ENVELOPE.finditer(text):
                 name = m.group("name").strip()
-                body = m.group("text").strip()
+                body = _STORED_NOTE.sub("", m.group("text").strip()).strip()
                 if not body:
                     continue
                 key = (ident, name, hash(body))

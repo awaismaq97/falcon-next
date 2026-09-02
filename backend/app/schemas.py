@@ -51,9 +51,16 @@ class DocAttachment(BaseModel):
     The frontend uploads the file to /documents/extract, then sends the extracted
     text here. It's injected into the model payload for this turn only; the stored
     user message keeps just a compact 📎 marker.
+
+    storage_id is the id /documents/extract already assigned when it saved the
+    upload. It travels with the attachment so the model can be told the file is
+    *already stored* — without it the model has no handle on the document and,
+    asked to "save this", re-pastes the entire text into a library_store command.
     """
     filename: str
     text: str
+    storage_id: str = ""
+    has_file: bool = False
 
 
 class ChatSendRequest(BaseModel):

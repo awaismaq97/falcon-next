@@ -52,15 +52,20 @@ function SpeakButton({ id, text }: { id: string; text: string }) {
 
 // The watcher emits [[TWEET_CONFIRM:<code>]] when it stages a tweet. Matching it
 // here is what turns the raw agent output into an approval card.
-const TWEET_CONFIRM_RE = /\[\[TWEET_CONFIRM:([0-9a-f]{4,8})\]\]/i;
+export const TWEET_CONFIRM_RE = /\[\[TWEET_CONFIRM:([0-9a-f]{4,8})\]\]/i;
 
 /** Post / Reject card for a tweet the agent has proposed.
  *
  * Status comes from the server rather than the chat message, so a tweet that was
  * already posted or rejected still renders correctly after a reload — the
  * message text is immutable history, the decision is not.
+ *
+ * Exported because post_tweet can also be run from the Watcher Agents tab, and a
+ * tweet staged there needs the same approval step. Nothing about the card is
+ * chat-specific: it takes an identity and a code and reads its state from the
+ * server, so the tweet is approved wherever it was staged.
  */
-function TweetConfirmCard({ identityId, code }: { identityId: string; code: string }) {
+export function TweetConfirmCard({ identityId, code }: { identityId: string; code: string }) {
   const qc = useQueryClient();
   const [busy, setBusy] = useState<"post" | "reject" | null>(null);
   // null until the user types — lets the server's copy stay authoritative while

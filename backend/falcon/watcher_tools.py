@@ -42,7 +42,7 @@ import json
 import logging
 import re
 import textwrap
-from typing import Callable
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +90,12 @@ def current_msg_id() -> str:
 # create a new tool, so deleting it would leave the system unable to grow one
 # back without a code change and redeploy.
 PROTECTED_TOOLS: frozenset[str] = frozenset({"spawn_agent"})
+
+# Tools that destroy something when they run. Not a permission — the watcher
+# dispatches these exactly as it does any other tool — but the Watcher Agents
+# tab, where a person presses Run with no model in between, asks for a second
+# press before dispatching one of these. Nothing here can be undone afterwards.
+DESTRUCTIVE_TOOLS: frozenset[str] = frozenset({"delete_doc"})
 
 
 def register_tool(name: str) -> Callable:
@@ -780,21 +786,26 @@ def _format_replies(
     # Search returns newest first; a conversation reads better oldest first.
     replies.reverse()
 
-    header = f"Replies to {root_handle} — https://x.com/i/web/status/{root_id}"
+    header = f"**Replies to {root_handle}** — https://x.com/i/web/status/{root_id}"
     quoted = " ".join((root.get("text") or "").split())
     if quoted:
-        header += f"\n> {quoted[:200]}{'…' if len(quoted) > 200 else ''}"
+        header += f"\n\n> {quoted[:200]}{'…' if len(quoted) > 200 else ''}"
 
     if not replies:
         return f"{header}\n\n{_explain_empty(root)}"
 
+    # A blank line between entries so each reply is its own paragraph in the
+    # chat; without it markdown runs the whole thread into one block of text.
     lines = []
     for i, post in enumerate(replies, start=1):
         author = users.get(post.get("author_id", ""), {})
         when = (post.get("created_at") or "")[:16].replace("T", " ")
-        kind = "" if _is_direct_reply(post, root_id) else "  (further down the thread)"
+        kind = " · _further down the thread_" if not _is_direct_reply(post, root_id) else ""
         text = " ".join((post.get("text") or "").split())
-        lines.append(f"{i}. {_handle(author, post.get('author_id', ''))} · {when}{kind}\n   {text}")
+        lines.append(
+            f"{i}. **{_handle(author, post.get('author_id', ''))}** · {when}{kind}\n\n"
+            f"   {text}"
+        )
 
     direct = sum(1 for p in replies if _is_direct_reply(p, root_id))
     hit_limit = len(replies) >= limit
@@ -802,12 +813,12 @@ def _format_replies(
     if hit_limit:
         summary += f" — stopped at the limit of {limit}; add 'limit N' for more"
 
-    out = f"{header}\n\n{summary}\n\n" + "\n".join(lines)
+    out = f"{header}\n\n{summary}\n\n" + "\n\n".join(lines)
     shortfall = _shortfall_note(root, direct, limit, hit_limit)
     if shortfall:
-        out += f"\n\n[NOTE] {shortfall}"
+        out += f"\n\n**[NOTE]** {shortfall}"
     if warning:
-        out += f"\n\n[WARNING] {warning}"
+        out += f"\n\n**[WARNING]** {warning}"
     return out
 
 
@@ -901,14 +912,16 @@ def _memory_status(payload: str) -> str:
     from falcon import memory_bridge
 
     configured = bool(os.environ.get("MONGODB_URI", "").strip())
-    lines = ["MEMORY STATUS", ""]
-    lines.append(f"configured : {'yes' if configured else 'NO — MONGODB_URI is not set'}")
+    lines = ["**MEMORY STATUS**", ""]
+    lines.append(f"- **Configured:** {'yes' if configured else '**NO** — MONGODB_URI is not set'}")
 
     if not configured:
-        lines.append("writable   : no (cannot connect without a connection string)")
-        lines.append("last_write : unknown")
-        lines.append("")
-        lines.append("Storage is NOT working. Do not claim anything was saved or remembered.")
+        lines += [
+            "- **Writable:** no (cannot connect without a connection string)",
+            "- **Last write:** unknown",
+            "",
+            "Storage is NOT working. Do not claim anything was saved or remembered.",
+        ]
         return "\n".join(lines)
 
     res = memory_bridge.check()
@@ -916,28 +929,222 @@ def _memory_status(payload: str) -> str:
         dur = res.get("durability") or {}
         proven = " (persistence proven across restarts)" if dur.get("survived_restart") else \
                  " (first probe on this database — durability not yet demonstrable)"
-        lines.append(f"writable   : yes — verified round-trip in {res['total_ms']} ms{proven}")
+        lines.append(f"- **Writable:** yes — verified round-trip in {res['total_ms']} ms{proven}")
     else:
-        lines.append(f"writable   : NO — failed at '{res['failed_step']}': {res['error']}")
+        lines.append(f"- **Writable:** **NO** — failed at '{res['failed_step']}': {res['error']}")
 
     last = Store.last_write()
     if last:
         when = last.get("at")
         when_s = when.strftime("%Y-%m-%d %H:%M UTC") if hasattr(when, "strftime") else str(when)
-        lines.append(f"last_write : {when_s} — {last.get('filename', '?')} ({last.get('storage_id', '?')})")
+        lines.append(
+            f"- **Last write:** {when_s} — {_md(last.get('filename', '?'))} "
+            f"(`{last.get('storage_id', '?')}`)"
+        )
     else:
-        lines.append("last_write : none recorded yet")
+        lines.append("- **Last write:** none recorded yet")
 
     try:
         st = Store.stats()
         by = ", ".join(f"{k}={v}" for k, v in sorted(st["by_source"].items())) or "none"
-        lines.append(f"documents  : {st['total']} stored ({by})")
+        lines.append(f"- **Documents:** {st['total']} stored ({by})")
     except Exception as exc:  # noqa: BLE001
-        lines.append(f"documents  : could not count ({exc})")
+        lines.append(f"- **Documents:** could not count ({exc})")
 
     if not res["ok"]:
-        lines.append("")
-        lines.append("Storage is NOT confirmed working. Do not claim anything was saved.")
+        lines += ["", "Storage is NOT confirmed working. Do not claim anything was saved."]
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# library_store — write text into the durable library with title and tags
+# ---------------------------------------------------------------------------
+
+# Metadata headers accepted at the top of a library_store payload. Several
+# spellings for each because the model reaches for whichever word fits its
+# sentence, and rejecting "Name:" in favour of "Title:" would fail a save for a
+# reason that has nothing to do with storage.
+_LIB_TITLE_KEYS = {"title", "name", "subject"}
+_LIB_TAGS_KEYS = {"tags", "tag", "keywords", "labels"}
+_LIB_BODY_KEYS = {"body", "text", "content", "document"}
+_LIB_HEADER_RE = re.compile(r"^\s*([A-Za-z_]{3,12})\s*[:=]\s*(.*)$")
+# A rule of dashes, equals or underscores — the conventional "metadata ends
+# here" marker, and the one thing that lets a body legitimately begin with
+# something that looks like a header.
+_LIB_SEP_RE = re.compile(r"^\s*(?:-{3,}|={3,}|_{3,}|\*{3,})\s*$")
+_LIB_TITLE_FROM_BODY = 80
+
+
+def _parse_library_payload(payload: str) -> tuple[str, list[str], str, str]:
+    """Split a library_store payload into (title, tags, body, error).
+
+    Accepts three shapes, because all three are things a model actually emits:
+
+      JSON      {"title": ..., "tags": [...], "body": ...}
+      Headers   Title: ...\\nTags: ...\\n---\\n<body>
+      Bare text the whole payload is the body and the first line becomes the title
+
+    Only ``Title``/``Tags``/``Body`` and their synonyms are consumed as headers,
+    and only in the run of lines at the very top. Anything else ends the header
+    block and starts the body, so a document whose first line happens to read
+    "Note: see chapter 4" keeps that line instead of losing it to a parser.
+    """
+    raw = (payload or "").strip()
+    if not raw:
+        return "", [], "", "library_store needs something to store — the payload was empty."
+
+    if raw.startswith("{"):
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            data = None
+        if isinstance(data, dict):
+            lowered = {str(k).strip().lower(): v for k, v in data.items()}
+            title = ""
+            for key in ("title", "name", "subject"):
+                if lowered.get(key):
+                    title = str(lowered[key]).strip()
+                    break
+            tags: Any = None
+            for key in ("tags", "tag", "keywords", "labels"):
+                if lowered.get(key) is not None:
+                    tags = lowered[key]
+                    break
+            body = ""
+            for key in ("body", "text", "content", "document"):
+                if lowered.get(key):
+                    body = str(lowered[key]).strip()
+                    break
+            if body:
+                from falcon import documents_store as Store
+
+                return title, Store.normalize_tags(tags), body, ""
+            # A JSON object with no body field is more likely a document that
+            # merely starts with a brace than a malformed command, so fall
+            # through to the text path rather than failing.
+
+    title = ""
+    tags_raw = ""
+    lines = raw.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if not line.strip():
+            i += 1
+            continue
+        if _LIB_SEP_RE.match(line):
+            i += 1
+            break
+        m = _LIB_HEADER_RE.match(line)
+        if not m:
+            break
+        key, value = m.group(1).strip().lower(), m.group(2).strip()
+        if key in _LIB_TITLE_KEYS:
+            title = title or value
+        elif key in _LIB_TAGS_KEYS:
+            tags_raw = tags_raw or value
+        elif key in _LIB_BODY_KEYS:
+            # Body may start on this line or on the next.
+            rest = "\n".join([value] + lines[i + 1:])
+            i = len(lines)
+            body = rest.strip()
+            from falcon import documents_store as Store
+
+            if not body:
+                return "", [], "", "the payload had headers but no body text to store."
+            return title, Store.normalize_tags(tags_raw), body, ""
+        else:
+            break
+        i += 1
+
+    body = "\n".join(lines[i:]).strip()
+    if not body:
+        return "", [], "", (
+            "the payload had headers but no body text to store. Put the full text "
+            "after the headers, separated by a line of dashes."
+        )
+
+    if not title:
+        # First body line, cleaned of markdown heading syntax. A derived title is
+        # better than "untitled" and the caller can always store an explicit one.
+        first = body.splitlines()[0].strip().lstrip("#").strip().strip("*_`").strip()
+        title = (first[:_LIB_TITLE_FROM_BODY].rstrip() + "…") if len(first) > _LIB_TITLE_FROM_BODY else first
+
+    from falcon import documents_store as Store
+
+    return title, Store.normalize_tags(tags_raw), body, ""
+
+
+@register_tool("library_store")
+def _library_store(payload: str) -> str:
+    """Store text in the durable library with a title and tags.
+
+    Payload accepts headers, JSON, or bare text::
+
+        Title: Chapter Three — The Descent
+        Tags: manuscript, draft, act-two
+        ---
+        <the full body text>
+
+    Returns the storage id only when the write has been read back and verified,
+    so a returned id always means the text is genuinely retrievable. A failure
+    says so plainly and hands back no id, because a false confirmation is the
+    one outcome the user cannot check for themselves.
+    """
+    from falcon import documents_store as Store
+
+    title, tags, body, error = _parse_library_payload(payload)
+    if error:
+        return f"[ERROR] NOT STORED — {error}"
+
+    identity = current_identity()
+    try:
+        res = Store.save(
+            identity,
+            title,
+            body,
+            source="library",
+            kind="library",
+            title=title,
+            tags=tags,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("library_store: save raised for %r: %s", title, exc)
+        return (
+            f"[ERROR] NOT STORED — the write failed: {type(exc).__name__}: {exc}\n"
+            "Nothing was saved. Do not tell the user this was stored."
+        )
+
+    if not res.get("ok"):
+        return (
+            f"[ERROR] NOT STORED — {res.get('error') or 'unknown storage failure'}\n"
+            "Nothing was saved. Do not tell the user this was stored."
+        )
+
+    when = res.get("saved_at")
+    when_s = when.strftime("%Y-%m-%d %H:%M UTC") if hasattr(when, "strftime") else str(when)
+    stored_tags = res.get("tags") or tags
+    lines = [
+        "**STORED** — written and read back, verified." if not res.get("duplicate")
+        else "**ALREADY STORED** — identical text was already in the library.",
+        "",
+        f"- **Storage id:** `{res['storage_id']}`",
+        f"- **Title:** {_md(res.get('title') or title)}",
+        f"- **Tags:** {', '.join(stored_tags) if stored_tags else '—'}",
+        f"- **Size:** {res.get('chars', len(body)):,} chars",
+        f"- **Saved:** {when_s}",
+    ]
+    if res.get("truncated"):
+        lines.append(
+            f"- **Note:** the text was longer than {Store.MAX_TEXT_CHARS:,} characters "
+            "and was truncated to fit."
+        )
+    if res.get("metadata_updated"):
+        lines.append("- **Note:** the title and tags on the existing entry were updated.")
+    lines += [
+        "",
+        f"Read it back at any time with `read_document {res['storage_id']}`.",
+    ]
     return "\n".join(lines)
 
 
@@ -962,33 +1169,127 @@ def _list_documents(payload: str) -> str:
             "recover any that are still in the audit log."
         )
 
-    header = f"{len(docs)} document(s)" + (f" matching {term!r}" if term else "")
-    lines = [header, ""]
+    n = len(docs)
+    header = f"**{n} document{'s' if n != 1 else ''}"
+    header += f" matching “{term}”**" if term else "**"
+
+    lines = [
+        header,
+        "",
+        "| Document | Storage ID | Tags | Size | Kind | Saved |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
     for d in docs:
         when = d.get("saved_at")
         when_s = when.strftime("%Y-%m-%d") if hasattr(when, "strftime") else str(when)[:10]
+        tags = d.get("tags") or []
+        # "file" means the original is downloadable; "text only" means all that
+        # survives is the extraction, so no download can be offered for it.
+        kind = "file" if d.get("file_id") else "text only"
         lines.append(
-            f"  {d['storage_id']}  {d.get('filename', '?')}  "
-            f"({d.get('chars', 0)} chars, {d.get('source', '?')}, {when_s})"
+            f"| {_md(Store.display_name(d))} | `{d['storage_id']}` "
+            f"| {_md(', '.join(tags)) if tags else '—'} | {d.get('chars', 0):,} chars "
+            f"| {kind} | {when_s} |"
         )
-    lines.append("")
-    lines.append("Use read_document with a storage id to read one.")
+    lines += [
+        "",
+        "Use `read_document` with a storage id to get one back. Entries marked **file** can be "
+        "handed to the user as a download; **text only** entries cannot.",
+    ]
     return "\n".join(lines)
+
+
+# How much of an uploaded file to show: enough to confirm it is the right
+# document, no more. The file itself is the deliverable — it goes back as a
+# download, not as thousands of characters printed into the chat. Free text has
+# no file to hand over, so it is returned whole instead.
+_DOC_PREVIEW_LINES = 6
+_DOC_PREVIEW_CHARS = 400
+
+
+def _first_lines(text: str, lines: int = _DOC_PREVIEW_LINES, chars: int = _DOC_PREVIEW_CHARS) -> str:
+    """The opening few lines, whichever limit is reached first.
+
+    Blank lines are dropped before counting: an extracted PDF is full of them,
+    and six lines of mostly whitespace identifies nothing.
+    """
+    kept: list[str] = []
+    used = 0
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        if len(kept) >= lines or used + len(line) > chars:
+            break
+        kept.append(line)
+        used += len(line)
+    if not kept:  # one very long unbroken line
+        return text[:chars].rstrip()
+    return "\n".join(kept)
+
+
+def _md(value: str) -> str:
+    """Make a value safe to drop into a markdown table cell.
+
+    Tool results are rendered as markdown in the chat, so a filename containing a
+    pipe would silently split a row into the wrong columns, and one containing a
+    newline would end the table early.
+    """
+    return (value or "").replace("|", "\\|").replace("\n", " ").strip()
+
+
+def _fence(text: str) -> str:
+    """Wrap document text so it displays as written and cannot restyle the chat.
+
+    An uploaded document is full of things markdown treats as syntax — hashes,
+    asterisks, numbered lines, tables. Rendered raw it reflows into headings and
+    lists and stops looking like the document. The fence is chosen longer than
+    any run of backticks inside, so a document containing code cannot break out.
+    """
+    longest = 0
+    run = 0
+    for ch in text:
+        run = run + 1 if ch == "`" else 0
+        longest = max(longest, run)
+    bar = "`" * max(3, longest + 1)
+    return f"{bar}text\n{text}\n{bar}"
+
+
+def _download_url(storage_id: str, identity: str) -> str:
+    """A path the chat UI turns into a working download link.
+
+    Relative on purpose: in production the frontend and the API share an origin,
+    and in development the client prefixes it with the API base it already knows.
+    Hard-coding a host here would be wrong in one of those two places.
+    """
+    from urllib.parse import quote
+
+    url = f"/api/documents/stored/{storage_id}/download"
+    return f"{url}?identity_id={quote(identity)}" if identity else url
 
 
 @register_tool("read_document")
 def _read_document(payload: str) -> str:
-    """Read a stored document back by its storage id.
+    """Return a stored document as a downloadable file, with a short preview.
 
-    Payload: the storage id, e.g. doc_a1b2c3d4e5f6.
+    Payload: the storage id, optionally followed by ``full``.
+
+    The default answer is the file itself — a download link and its metadata —
+    because someone who uploaded a PDF and asks for it back wants the PDF, not
+    the text scraped out of it. Add ``full`` to get the entire extracted text,
+    which is what to do when the contents actually need to be read or analysed
+    rather than handed over.
     """
     from falcon import documents_store as Store
 
-    storage_id = (payload or "").strip().split()[0] if (payload or "").strip() else ""
-    if not storage_id:
+    parts = (payload or "").strip().split()
+    if not parts:
         return "[ERROR] read_document requires a storage id (e.g. doc_a1b2c3d4e5f6)."
 
-    doc = Store.get(storage_id, current_identity())
+    storage_id = parts[0]
+    want_full = any(p.lower() in ("full", "text", "all", "--full") for p in parts[1:])
+
+    identity = current_identity()
+    doc = Store.get(storage_id, identity)
     if not doc:
         return (
             f"[ERROR] No stored document with id {storage_id!r} for this identity. "
@@ -997,11 +1298,194 @@ def _read_document(payload: str) -> str:
 
     when = doc.get("saved_at")
     when_s = when.strftime("%Y-%m-%d %H:%M UTC") if hasattr(when, "strftime") else str(when)
-    head = (
-        f"{doc.get('filename', '?')} ({doc['storage_id']}, {doc.get('chars', 0)} chars, "
-        f"saved {when_s})"
-    )
-    return f"{head}\n\n{doc.get('text', '')}"
+    tags = doc.get("tags") or []
+    text = doc.get("text", "")
+    name = Store.display_name(doc)
+
+    lines = [f"### {name}", ""]
+    lines.append(f"- **Storage id:** `{doc['storage_id']}`")
+    if tags:
+        lines.append(f"- **Tags:** {', '.join(tags)}")
+    lines.append(f"- **Saved:** {when_s}")
+
+    has_file = bool(doc.get("file_id"))
+    if has_file:
+        size = doc.get("bytes", 0)
+        pretty = f"{size / 1024:,.0f} KB" if size < 1024 * 1024 else f"{size / 1048576:.1f} MB"
+        lines.append(f"- **File:** {doc.get('content_type') or 'file'}, {pretty}")
+        lines.append(f"- **Download:** [{_md(name)}]({_download_url(storage_id, identity)})")
+        lines += [
+            "",
+            "Give the user that download link exactly as written — it is a markdown link and "
+            "the chat renders it as a working download of the original file.",
+        ]
+    else:
+        lines.append(f"- **File:** none — stored as text only ({doc.get('chars', 0):,} chars)")
+        lines += [
+            "",
+            "There is no original file for this entry, so there is nothing to download. "
+            "Say so rather than offering a link.",
+        ]
+
+    if doc.get("truncated"):
+        lines += [
+            "",
+            "**Note:** the stored text was truncated at the extraction limit, so it is not the "
+            + ("complete document. The downloadable file is complete."
+               if has_file else "complete document."),
+        ]
+
+    # Free text — a library entry, notes, a draft — has no file to hand over, so
+    # the text IS the document and comes back whole. An uploaded file is the
+    # opposite: the download is the document, and its extracted text is only a
+    # way to identify and search it, so it is shown a few lines at a time.
+    if not has_file:
+        lines += ["", f"**Full text** — {doc.get('chars', 0):,} characters", "", _fence(text)]
+        return "\n".join(lines)
+
+    if want_full:
+        lines += [
+            "",
+            f"**Full text** — {doc.get('chars', 0):,} characters, extracted from the file",
+            "",
+            _fence(text),
+            "",
+            "This was requested in full for analysis. Do not print it back to the user — "
+            "answer from it, quote only what matters, and give them the download link above.",
+        ]
+        return "\n".join(lines)
+
+    preview = _first_lines(text)
+    lines += [
+        "",
+        f"**Opening lines** — of {doc.get('chars', 0):,} extracted characters",
+        "",
+        _fence(preview),
+    ]
+    if len(text) > len(preview):
+        lines += [
+            "",
+            "That is the start of the file, not the file. The download link above is what the "
+            "user wants when they ask for this document. Only if you need to analyse, search "
+            f"or quote the contents, run read_document again as `{storage_id} full` — and even "
+            "then, never reproduce the whole text in your reply.",
+        ]
+    return "\n".join(lines)
+
+
+# A storage id is the only thing this tool accepts. Matching the shape rather
+# than taking the payload whole means "delete everything" or a title typed by
+# mistake is refused instead of being interpreted as an id that happens not to
+# exist — the model gets told what it did wrong.
+_DOC_ID_RE = re.compile(r"\bdoc_[0-9a-f]{12}\b", re.I)
+
+
+@register_tool("delete_doc")
+def _delete_doc(payload: str) -> str:
+    """Permanently delete a stored document, its original file and its listing.
+
+    Payload: one storage id, or several separated by spaces or commas.
+
+    This is the only tool that destroys stored content, and there is no undo —
+    the record goes from the collection and the bytes go from GridFS. So it
+    reports what it removed by title rather than only by id (the user should be
+    able to see whether the right thing went), and it verifies the record is
+    actually gone afterwards rather than trusting the delete call, for the same
+    reason library_store reads its writes back.
+    """
+    from falcon import documents_store as Store
+
+    raw = (payload or "").strip()
+    if not raw:
+        return (
+            "[ERROR] delete_doc requires a storage id (e.g. doc_a1b2c3d4e5f6). "
+            "Use list_documents to find it."
+        )
+
+    ids: list[str] = []
+    for found in _DOC_ID_RE.findall(raw):
+        found = found.lower()
+        if found not in ids:  # the same id twice is one deletion, not a failure
+            ids.append(found)
+
+    if not ids:
+        return (
+            f"[ERROR] NOT DELETED — no storage id in {raw!r}. This command takes ids of the "
+            "form doc_a1b2c3d4e5f6, not titles, filenames or words like 'all'. Run "
+            "list_documents to get the id of the document the user means, and delete only "
+            "the one they asked for."
+        )
+
+    identity = current_identity()
+    done: list[str] = []
+    missing: list[str] = []
+    failed: list[str] = []
+
+    for storage_id in ids:
+        # Read it before it goes: afterwards there is nothing left to name it by.
+        doc = Store.get(storage_id, identity)
+        if not doc:
+            missing.append(storage_id)
+            continue
+
+        name = Store.display_name(doc)
+        tags = doc.get("tags") or []
+        had_file = bool(doc.get("file_id"))
+
+        try:
+            removed = Store.delete(storage_id, identity)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("delete_doc: delete raised for %s: %s", storage_id, exc)
+            failed.append(f"`{storage_id}` — {type(exc).__name__}: {exc}")
+            continue
+
+        if not removed or Store.get(storage_id, identity):
+            logger.error("delete_doc: %s still present after delete", storage_id)
+            failed.append(f"`{storage_id}` — the database reported no deletion")
+            continue
+
+        detail = f"| {_md(name)} | `{storage_id}` "
+        detail += f"| {_md(', '.join(tags)) if tags else '—'} "
+        detail += f"| {'file and text' if had_file else 'text only'} |"
+        done.append(detail)
+        logger.info("delete_doc: %s removed for identity %s", storage_id, identity or "-")
+
+    lines: list[str] = []
+    if done:
+        lines += [
+            f"**DELETED** — {len(done)} document{'s' if len(done) != 1 else ''} permanently "
+            "removed from storage and from list_documents.",
+            "",
+            "| Document | Storage ID | Tags | Removed |",
+            "| --- | --- | --- | --- |",
+            *done,
+        ]
+    if missing:
+        if lines:
+            lines.append("")
+        lines.append(
+            "**Not found:** " + ", ".join(f"`{m}`" for m in missing) + " — no such document "
+            "for this identity. It may already have been deleted, or the id may be wrong; "
+            "check list_documents. Nothing was removed for these."
+        )
+    if failed:
+        if lines:
+            lines.append("")
+        lines += ["**FAILED — still stored:**", "", *[f"- {f}" for f in failed]]
+
+    if not done and not failed:
+        # Nothing existed, so nothing happened — say so plainly rather than
+        # letting a "DELETED" heading imply otherwise.
+        return "[ERROR] NOT DELETED — " + "\n".join(lines).replace("**Not found:** ", "")
+
+    lines += [
+        "",
+        "Deletion is permanent — the record and the original file are gone and cannot be "
+        "recovered. Tell the user exactly which documents were removed."
+        if done else
+        "Nothing was deleted. Do not tell the user the document is gone.",
+    ]
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------

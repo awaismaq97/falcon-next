@@ -68,15 +68,36 @@ def _has_image_markdown(text: str, *urls: str) -> bool:
 
 
 def _compose_with_documents(message: str, documents) -> str:
-    """Append extracted document text to the user message for the model payload."""
+    """Append extracted document text to the user message for the model payload.
+
+    The envelope states the storage id, because the alternative is worse than it
+    sounds: a model handed a document with no handle on it, and asked to "save
+    this", has only one way to save anything — paste the entire text into a
+    library_store command. The user then watches their whole PDF get typed back
+    into the chat to store a file that was already stored at upload. Naming the
+    id turns that into a one-line acknowledgement.
+    """
     if not documents:
         return message
     blocks = []
     for d in documents:
         name = getattr(d, "filename", "document")
         text = getattr(d, "text", "") or ""
-        if text.strip():
-            blocks.append(f"--- Attached document: {name} ---\n{text}\n--- End of {name} ---")
+        if not text.strip():
+            continue
+        storage_id = getattr(d, "storage_id", "") or ""
+        if storage_id:
+            head = (
+                f"--- Attached document: {name} ---\n"
+                f"[Already saved permanently as {storage_id}"
+                + (", original file downloadable" if getattr(d, "has_file", False) else "")
+                + ". It does not need saving again — if asked to save or keep it, say it is "
+                f"already stored and give the id. Use read_document {storage_id} to get it "
+                "back in a later session. Do not copy this text into a command.]"
+            )
+        else:
+            head = f"--- Attached document: {name} ---"
+        blocks.append(f"{head}\n{text}\n--- End of {name} ---")
     if not blocks:
         return message
     doc_text = "\n\n".join(blocks)
@@ -102,6 +123,22 @@ def _persist_documents(identity_id: str, documents) -> list[dict]:
         text = getattr(d, "text", "") or ""
         if not text.strip():
             continue
+
+        # Already stored at upload time, where the original bytes were still
+        # available. Re-saving here would only find the same record by content
+        # hash, and would arrive without the file — so confirm it is really
+        # there and move on.
+        existing_id = getattr(d, "storage_id", "") or ""
+        if existing_id and Store.get(existing_id, identity_id):
+            results.append({
+                "ok": True,
+                "storage_id": existing_id,
+                "filename": name,
+                "duplicate": True,
+                "error": "",
+            })
+            continue
+
         try:
             res = Store.save(identity_id, name, text, source="upload")
         except Exception as exc:  # noqa: BLE001

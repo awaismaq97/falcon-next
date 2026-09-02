@@ -3,6 +3,7 @@
 import { type ClipboardEvent, useRef, useState } from "react";
 import { ArrowUp, Paperclip, X, Square, FileText, Loader2, AlertCircle } from "lucide-react";
 import { api } from "@/lib/api";
+import { useSettings } from "@/lib/store";
 import type { DocAttachment } from "@/lib/types";
 import { Button } from "@/components/ui/primitives";
 import { toast } from "@/components/ui/toast";
@@ -36,6 +37,11 @@ type DocAtt = {
   chars?: number;
   truncated?: boolean;
   error?: string;
+  // Assigned by /documents/extract when it stored the upload. Sent on with the
+  // turn so the model knows the file is already saved and can refer to it by id
+  // instead of re-pasting its text to "save" it.
+  storageId?: string;
+  hasFile?: boolean;
 };
 type Attachment = ImageAtt | DocAtt;
 
@@ -94,6 +100,7 @@ export function ChatInput({
   const [atts, setAtts] = useState<Attachment[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
+  const identityId = useSettings((s) => s.identityId);
 
   function patchDoc(id: string, patch: Partial<DocAtt>) {
     setAtts((prev) => prev.map((a) => (a.id === id && a.kind === "doc" ? { ...a, ...patch } : a)));
@@ -101,8 +108,17 @@ export function ChatInput({
 
   async function extractDoc(att: DocAtt) {
     try {
-      const r = await api.extractDocument(att.file);
-      patchDoc(att.id, { status: "ready", text: r.text, chars: r.chars, truncated: r.truncated });
+      // The identity is what lets the backend keep the original file, so the
+      // upload can be handed back as a PDF later instead of as its text.
+      const r = await api.extractDocument(att.file, identityId);
+      patchDoc(att.id, {
+        status: "ready",
+        text: r.text,
+        chars: r.chars,
+        truncated: r.truncated,
+        storageId: r.storage_id,
+        hasFile: r.has_file,
+      });
       if (r.truncated) toast.info(`"${att.file.name}" was long — using the first ~200k characters.`);
     } catch (e) {
       patchDoc(att.id, { status: "error", error: (e as Error).message });
@@ -170,7 +186,12 @@ export function ChatInput({
       return;
     }
     if (!hasSendable) return;
-    const docs: DocAttachment[] = readyDocs.map((d) => ({ filename: d.file.name, text: d.text! }));
+    const docs: DocAttachment[] = readyDocs.map((d) => ({
+      filename: d.file.name,
+      text: d.text!,
+      storage_id: d.storageId ?? "",
+      has_file: d.hasFile ?? false,
+    }));
     onSend(
       text,
       images.map((i) => i.file),
