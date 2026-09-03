@@ -69,6 +69,11 @@ export function ChatTab() {
 
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  // Monotonic per-turn id so pending messages have a key that survives the
+  // whole turn — timestamps arrive mid-stream (meta → user_ts, done → asst_ts)
+  // and a timestamp-based key would remount the row inside the scroll
+  // container as those events land, snapping the viewport.
+  const turnIdRef = useRef(0);
   // Confirmed server-side result of the in-flight turn, captured from the SSE
   // stream so we can append it to the history cache instead of refetching.
   const outcomeRef = useRef<{
@@ -123,7 +128,11 @@ export function ChatTab() {
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     rafRef.current = requestAnimationFrame(() => {
       const el = scrollRef.current;
-      if (el) el.scrollTop = el.scrollHeight;
+      // A hidden tab (display:none) reports scrollHeight 0 — writing scrollTop
+      // then would land on the very top, which is the "jumped to first message"
+      // bug. Skip; the layout-restore effect will re-pin us when we come back.
+      if (!el || el.clientHeight === 0) return;
+      el.scrollTop = el.scrollHeight;
     });
   }, [turnStarted]);
 
@@ -135,7 +144,9 @@ export function ChatTab() {
     if (!streaming) return;
     const id = requestAnimationFrame(() => {
       const el = scrollRef.current;
-      if (!el) return;
+      // Skip while the tab is hidden — a display:none container reads
+      // scrollHeight/clientHeight as 0, which would falsely un-stick us.
+      if (!el || el.clientHeight === 0) return;
       const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
       stickRef.current = atBottom;
       setShowJump(!atBottom);
@@ -144,15 +155,56 @@ export function ChatTab() {
   }, [pending, streaming]);
 
   // Reset paging and snap to the newest message on identity switch / first load.
+  // The tab is `forceMount`ed and hidden with display:none when not active, so
+  // this effect fires while the container has no layout (scrollHeight === 0);
+  // writing scrollTop then would silently pin us to the top. We remember that
+  // we still owe a snap-to-bottom and do it on the next resize (i.e. when the
+  // tab becomes visible again).
+  const pendingSnapRef = useRef(false);
   useEffect(() => {
     setVisible(PAGE);
     stickRef.current = true;
     setShowJump(false);
+    pendingSnapRef.current = true;
     requestAnimationFrame(() => {
       const el = scrollRef.current;
-      if (el) el.scrollTop = el.scrollHeight;
+      if (!el || el.clientHeight === 0) return;
+      el.scrollTop = el.scrollHeight;
+      pendingSnapRef.current = false;
     });
   }, [identityId, isLoading]);
+
+  // When the tab becomes visible (or the window/container is resized), restore
+  // the intended scroll position. Two cases:
+  //  - a snap-to-bottom was queued while we were hidden (identity switch, first
+  //    load, or a turn that started off-tab) — do it now that layout exists;
+  //  - we were pinned to the bottom, but a mid-key remount or another effect
+  //    that ran under display:none left scrollTop at 0 — re-pin.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const restore = () => {
+      const box = scrollRef.current;
+      if (!box || box.clientHeight === 0) return;
+      if (pendingSnapRef.current || stickRef.current) {
+        box.scrollTop = box.scrollHeight;
+        pendingSnapRef.current = false;
+      }
+    };
+    // ResizeObserver fires when the container's box goes from 0 → real (the
+    // moment the tab becomes visible), and again on window resizes.
+    const ro = new ResizeObserver(restore);
+    ro.observe(el);
+    // The browser tab coming back from background: layout may be stale.
+    const onVis = () => {
+      if (document.visibilityState === "visible") restore();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      ro.disconnect();
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, []);
 
   useEffect(() => () => void (rafRef.current && cancelAnimationFrame(rafRef.current)), []);
 
@@ -225,6 +277,7 @@ export function ChatTab() {
     if (docs.length) markers.push(`📎 _${docs.map((d) => d.filename).join(", ")}_`);
     const marker = markers.join("\n\n");
     const userMarker = marker ? (text ? `${text}\n\n${marker}` : marker) : text;
+    turnIdRef.current += 1;
     setPending([
       { role: "user", content: userMarker, timestamp: "" },
       { role: "assistant", content: "", timestamp: "", _streaming: true, _events: undefined },
@@ -355,9 +408,19 @@ export function ChatTab() {
               )}
               {shown.map((m, i) => {
                 const ts = m.role === "assistant" ? userTsBefore(i) : null;
+                // Persisted history rows key by timestamp (stable, unique).
+                // Pending rows key by turn id + role — their timestamp arrives
+                // mid-stream (meta / done events) and a key change there would
+                // remount the row inside the scroll container, defeating the
+                // browser's scroll anchoring and snapping the viewport up.
+                const globalIdx = allMessages.length - shown.length + i;
+                const isPending = globalIdx >= history.length;
+                const key = isPending
+                  ? `pending-${turnIdRef.current}-${m.role}`
+                  : `msg-${m.timestamp}`;
                 return (
                   <ChatMessage
-                    key={`${m.timestamp}-${i}`}
+                    key={key}
                     message={m}
                     contextTs={ts}
                     onOpenContext={openContext}
