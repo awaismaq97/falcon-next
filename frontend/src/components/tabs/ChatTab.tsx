@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown } from "lucide-react";
 import { api } from "@/lib/api";
 import { streamChat } from "@/lib/sse";
@@ -26,11 +26,6 @@ import { Button, Spinner } from "@/components/ui/primitives";
 import { toast } from "@/components/ui/toast";
 
 const PAGE = 30;
-
-// Restoring a scroll offset has to happen before the browser paints, or the
-// reader sees the wrong position flash first. useLayoutEffect would warn during
-// SSR, so fall back to useEffect on the server (where it never runs anyway).
-const useIsoLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
 
 function fileToDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -74,11 +69,6 @@ export function ChatTab() {
 
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
-  // Monotonic per-turn id so pending messages have a key that survives the
-  // whole turn — timestamps arrive mid-stream (meta → user_ts, done → asst_ts)
-  // and a timestamp-based key would remount the row inside the scroll
-  // container as those events land, snapping the viewport.
-  const turnIdRef = useRef(0);
   // Confirmed server-side result of the in-flight turn, captured from the SSE
   // stream so we can append it to the history cache instead of refetching.
   const outcomeRef = useRef<{
@@ -92,10 +82,6 @@ export function ChatTab() {
   } | null>(null);
   const stickRef = useRef(true); // follow new content only while pinned to bottom
   const rafRef = useRef<number | null>(null);
-  // The reader's last known offset. Updated wherever their position is
-  // authoritative (a scroll event, a streaming measurement) and replayed across
-  // commits that would otherwise move them — chiefly the end of a turn.
-  const lastTopRef = useRef(0);
   const measureRef = useRef<number | null>(null);
   const [showJump, setShowJump] = useState(false);
 
@@ -124,7 +110,6 @@ export function ChatTab() {
     if (!el) return;
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
     stickRef.current = atBottom;
-    lastTopRef.current = el.scrollTop;
     setShowJump(!atBottom); // no-op re-render when value is unchanged (React bails)
   }, []);
 
@@ -141,7 +126,7 @@ export function ChatTab() {
       const el = scrollRef.current;
       // A hidden tab (display:none) reports scrollHeight 0 — writing scrollTop
       // then would land on the very top, which is the "jumped to first message"
-      // bug. Skip; the layout-restore effect will re-pin us when we come back.
+      // bug. Skip rather than write a meaningless offset.
       if (!el || el.clientHeight === 0) return;
       el.scrollTop = el.scrollHeight;
     });
@@ -167,7 +152,6 @@ export function ChatTab() {
       if (!el || el.clientHeight === 0) return;
       const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
       stickRef.current = atBottom;
-      lastTopRef.current = el.scrollTop;
       setShowJump(!atBottom);
     });
   }, [pending, streaming]);
@@ -207,7 +191,6 @@ export function ChatTab() {
       if (!box || box.clientHeight === 0) return;
       if (!pendingSnapRef.current) return;
       box.scrollTop = box.scrollHeight;
-      lastTopRef.current = box.scrollTop;
       pendingSnapRef.current = false;
     };
     // ResizeObserver fires when the container's box goes from 0 → real (the
@@ -224,27 +207,6 @@ export function ChatTab() {
       document.removeEventListener("visibilitychange", onVis);
     };
   }, []);
-
-  // Ending a turn is the single biggest disturbance to the scroll container: the
-  // two live rows are replaced by their persisted equivalents (different keys,
-  // so React remounts them), the paging window slides as history grows, and the
-  // composer changes height. Any of those can shift the viewport out from under
-  // someone who is still reading. Pin the offset back before the browser paints
-  // — unless they are genuinely parked at the bottom, where staying pinned to
-  // the bottom is what they asked for.
-  const wasStreamingRef = useRef(false);
-  useIsoLayoutEffect(() => {
-    const finished = wasStreamingRef.current && !streaming;
-    wasStreamingRef.current = streaming;
-    const el = scrollRef.current;
-    if (!finished || !el || el.clientHeight === 0) return;
-    if (stickRef.current) {
-      el.scrollTop = el.scrollHeight;
-      lastTopRef.current = el.scrollTop;
-      return;
-    }
-    if (el.scrollTop !== lastTopRef.current) el.scrollTop = lastTopRef.current;
-  }, [streaming, allMessages]);
 
   useEffect(
     () => () => {
@@ -323,7 +285,6 @@ export function ChatTab() {
     if (docs.length) markers.push(`📎 _${docs.map((d) => d.filename).join(", ")}_`);
     const marker = markers.join("\n\n");
     const userMarker = marker ? (text ? `${text}\n\n${marker}` : marker) : text;
-    turnIdRef.current += 1;
     setPending([
       { role: "user", content: userMarker, timestamp: "" },
       { role: "assistant", content: "", timestamp: "", _streaming: true, _events: undefined },
@@ -454,19 +415,14 @@ export function ChatTab() {
               )}
               {shown.map((m, i) => {
                 const ts = m.role === "assistant" ? userTsBefore(i) : null;
-                // Persisted history rows key by timestamp (stable, unique).
-                // Pending rows key by turn id + role — their timestamp arrives
-                // mid-stream (meta / done events) and a key change there would
-                // remount the row inside the scroll container, defeating the
-                // browser's scroll anchoring and snapping the viewport up.
-                const globalIdx = allMessages.length - shown.length + i;
-                const isPending = globalIdx >= history.length;
-                const key = isPending
-                  ? `pending-${turnIdRef.current}-${m.role}`
-                  : `msg-${m.timestamp}`;
+                // Key by timestamp+position. By the time a turn is finalised the
+                // live rows already carry the server's timestamps, so they key
+                // identically to the persisted rows that replace them — React
+                // reuses the components instead of remounting them, and the
+                // reader's position survives the swap.
                 return (
                   <ChatMessage
-                    key={key}
+                    key={`${m.timestamp}-${i}`}
                     message={m}
                     contextTs={ts}
                     onOpenContext={openContext}
