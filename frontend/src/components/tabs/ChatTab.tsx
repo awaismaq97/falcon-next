@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown } from "lucide-react";
 import { api } from "@/lib/api";
 import { streamChat } from "@/lib/sse";
@@ -26,6 +26,11 @@ import { Button, Spinner } from "@/components/ui/primitives";
 import { toast } from "@/components/ui/toast";
 
 const PAGE = 30;
+
+// Restoring a scroll offset has to happen before the browser paints, or the
+// reader sees the wrong position flash first. useLayoutEffect would warn during
+// SSR, so fall back to useEffect on the server (where it never runs anyway).
+const useIsoLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
 
 function fileToDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -87,6 +92,11 @@ export function ChatTab() {
   } | null>(null);
   const stickRef = useRef(true); // follow new content only while pinned to bottom
   const rafRef = useRef<number | null>(null);
+  // The reader's last known offset. Updated wherever their position is
+  // authoritative (a scroll event, a streaming measurement) and replayed across
+  // commits that would otherwise move them — chiefly the end of a turn.
+  const lastTopRef = useRef(0);
+  const measureRef = useRef<number | null>(null);
   const [showJump, setShowJump] = useState(false);
 
   const history = useMemo(() => historyData?.messages ?? [], [historyData]);
@@ -114,6 +124,7 @@ export function ChatTab() {
     if (!el) return;
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
     stickRef.current = atBottom;
+    lastTopRef.current = el.scrollTop;
     setShowJump(!atBottom); // no-op re-render when value is unchanged (React bails)
   }, []);
 
@@ -140,18 +151,25 @@ export function ChatTab() {
   // sees the viewport drift away from the bottom while output streams in. Re-run
   // the same test after each update so "jump to latest" appears as soon as there
   // is something down there to jump to.
+  //
+  // Coalesce onto the next free frame rather than cancel-and-reschedule. Tokens
+  // land faster than the browser paints, so cancelling on every chunk starved
+  // this callback for the whole reply and left `stickRef` at whatever the turn
+  // began with — `true`. A stale `true` is what let the view snap to the bottom
+  // the moment a reply finished, throwing away the reader's place.
   useEffect(() => {
-    if (!streaming) return;
-    const id = requestAnimationFrame(() => {
+    if (!streaming || measureRef.current !== null) return;
+    measureRef.current = requestAnimationFrame(() => {
+      measureRef.current = null;
       const el = scrollRef.current;
       // Skip while the tab is hidden — a display:none container reads
       // scrollHeight/clientHeight as 0, which would falsely un-stick us.
       if (!el || el.clientHeight === 0) return;
       const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
       stickRef.current = atBottom;
+      lastTopRef.current = el.scrollTop;
       setShowJump(!atBottom);
     });
-    return () => cancelAnimationFrame(id);
   }, [pending, streaming]);
 
   // Reset paging and snap to the newest message on identity switch / first load.
@@ -174,22 +192,23 @@ export function ChatTab() {
     });
   }, [identityId, isLoading]);
 
-  // When the tab becomes visible (or the window/container is resized), restore
-  // the intended scroll position. Two cases:
-  //  - a snap-to-bottom was queued while we were hidden (identity switch, first
-  //    load, or a turn that started off-tab) — do it now that layout exists;
-  //  - we were pinned to the bottom, but a mid-key remount or another effect
-  //    that ran under display:none left scrollTop at 0 — re-pin.
+  // When the tab becomes visible again (display:none → laid out), pay off a
+  // snap-to-bottom that could not run while the container had no height.
+  //
+  // Deliberately keyed on that debt alone, never on `stickRef`: this container
+  // also resizes for reasons that have nothing to do with new messages — the
+  // composer growing a line, its Stop button becoming Send when a reply lands, a
+  // window resize — and none of those are a reason to move the reader.
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     const restore = () => {
       const box = scrollRef.current;
       if (!box || box.clientHeight === 0) return;
-      if (pendingSnapRef.current || stickRef.current) {
-        box.scrollTop = box.scrollHeight;
-        pendingSnapRef.current = false;
-      }
+      if (!pendingSnapRef.current) return;
+      box.scrollTop = box.scrollHeight;
+      lastTopRef.current = box.scrollTop;
+      pendingSnapRef.current = false;
     };
     // ResizeObserver fires when the container's box goes from 0 → real (the
     // moment the tab becomes visible), and again on window resizes.
@@ -206,7 +225,34 @@ export function ChatTab() {
     };
   }, []);
 
-  useEffect(() => () => void (rafRef.current && cancelAnimationFrame(rafRef.current)), []);
+  // Ending a turn is the single biggest disturbance to the scroll container: the
+  // two live rows are replaced by their persisted equivalents (different keys,
+  // so React remounts them), the paging window slides as history grows, and the
+  // composer changes height. Any of those can shift the viewport out from under
+  // someone who is still reading. Pin the offset back before the browser paints
+  // — unless they are genuinely parked at the bottom, where staying pinned to
+  // the bottom is what they asked for.
+  const wasStreamingRef = useRef(false);
+  useIsoLayoutEffect(() => {
+    const finished = wasStreamingRef.current && !streaming;
+    wasStreamingRef.current = streaming;
+    const el = scrollRef.current;
+    if (!finished || !el || el.clientHeight === 0) return;
+    if (stickRef.current) {
+      el.scrollTop = el.scrollHeight;
+      lastTopRef.current = el.scrollTop;
+      return;
+    }
+    if (el.scrollTop !== lastTopRef.current) el.scrollTop = lastTopRef.current;
+  }, [streaming, allMessages]);
+
+  useEffect(
+    () => () => {
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      if (measureRef.current) cancelAnimationFrame(measureRef.current);
+    },
+    [],
+  );
 
   function updateAssistant(fn: (m: Message) => Message) {
     setPending((prev) => {
