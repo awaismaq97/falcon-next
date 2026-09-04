@@ -152,6 +152,10 @@ export interface Message {
   _warning?: string;
   _judge?: JudgePayload | null;
   _suppressed?: boolean;
+  /** Set by the server on results the watcher injected. Not client-only — it is
+   *  persisted, round-tripped by the Logs editor, and styles the agent-result
+   *  block. */
+  _watcher?: boolean;
 }
 
 export interface PersonaFields {

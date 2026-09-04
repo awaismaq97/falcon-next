@@ -338,14 +338,16 @@ export const ChatMessage = memo(function ChatMessage({
   identityId?: string;
 }) {
   const isUser = message.role === "user";
-  const isWatcher = !!(message as any)._watcher;
+  const isWatcher = !!message._watcher;
   const hasContext = !!contextTs;
   const ttsId = message.timestamp || "";
   const canSpeakThis = canSpeak && !!ttsId && !message._suppressed && !!message.content;
 
   if (isUser) {
     return (
-      <div className="flex justify-end px-4 py-1.5">
+      // data-msg-ts lets ChatTab anchor the viewport to a specific row, so a
+      // bulk change above the reader (the retention trim) can be compensated.
+      <div data-msg-ts={message.timestamp || undefined} className="flex justify-end px-4 py-1.5">
         <div className="max-w-[85%] rounded-2xl bg-[var(--color-user-bubble)] px-4 py-2.5">
           <Markdown>{message.content}</Markdown>
         </div>
@@ -368,7 +370,7 @@ export const ChatMessage = memo(function ChatMessage({
     const body = staged ? inner.replace(TWEET_CONFIRM_RE, "").trim() : inner;
 
     return (
-      <div className="px-4 py-1.5">
+      <div data-msg-ts={message.timestamp || undefined} className="px-4 py-1.5">
         <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">
           {/* Header bar */}
           <div className="flex items-center gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5">
@@ -391,7 +393,7 @@ export const ChatMessage = memo(function ChatMessage({
   }
 
   return (
-    <div className="group px-4 py-1.5">
+    <div data-msg-ts={message.timestamp || undefined} className="group px-4 py-1.5">
       <div className="flex gap-3">
         <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[var(--color-accent)] text-[0.7rem] text-[var(--color-bg)]">
           🦅

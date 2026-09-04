@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown } from "lucide-react";
 import { api } from "@/lib/api";
 import { streamChat } from "@/lib/sse";
@@ -26,6 +26,11 @@ import { Button, Spinner } from "@/components/ui/primitives";
 import { toast } from "@/components/ui/toast";
 
 const PAGE = 30;
+
+// Scroll compensation must land before the browser paints, or the reader sees
+// the wrong position flash first. useLayoutEffect warns during SSR, so fall
+// back to useEffect on the server, where it never runs anyway.
+const useIsoLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
 
 function fileToDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -57,7 +62,17 @@ export function ChatTab() {
 
   const [pending, setPending] = useState<Message[]>([]);
   const [streaming, setStreaming] = useState(false);
-  const [visible, setVisible] = useState(PAGE);
+  // The oldest message currently on screen, identified by timestamp rather than
+  // by an index or a count from the tail.
+  //
+  // Both of those alternatives break on this conversation. A tail-anchored
+  // window ("show the last N") slides whenever a message is appended, dropping
+  // the oldest row and taking its height from *above* the reader. An index or
+  // count is invalidated by the retention trim in useHistoryAppender, which
+  // removes messages from the front of the list wholesale. A timestamp survives
+  // both: it names a row, so the boundary stays on the same message no matter
+  // how the list around it changes.
+  const [topTs, setTopTs] = useState<string | null>(null);
   const [contextTs, setContextTs] = useState<string | null>(null);
   const [preview, setPreview] = useState<{
     payload: unknown;
@@ -90,8 +105,14 @@ export function ChatTab() {
 
   // Combined view: persisted history + the in-flight turn.
   const allMessages = useMemo(() => [...history, ...pending], [history, pending]);
-  const shown = allMessages.slice(Math.max(0, allMessages.length - visible));
-  const hiddenCount = allMessages.length - shown.length;
+  // If the boundary message is gone (trimmed away, or deleted in the Logs tab)
+  // there is nothing older left to hide, so show everything that remains.
+  const hiddenCount = useMemo(() => {
+    if (!topTs) return 0;
+    const i = allMessages.findIndex((m) => m.timestamp === topTs);
+    return i === -1 ? 0 : i;
+  }, [allMessages, topTs]);
+  const shown = allMessages.slice(hiddenCount);
 
   const openContext = useCallback((ts: string) => setContextTs(ts), []);
 
@@ -103,6 +124,27 @@ export function ChatTab() {
     el.scrollTo({ top: el.scrollHeight, behavior: smooth ? "smooth" : "auto" });
   }, []);
 
+  // The row the reader is looking at, and where in the viewport it sits.
+  // Recorded as an element, not a pixel offset: the retention trim removes
+  // whole messages from the front of the list, so an offset measured before it
+  // means nothing afterwards, whereas "this message was 40px below the top"
+  // still does.
+  const anchorRef = useRef<{ ts: string; top: number } | null>(null);
+
+  const captureAnchor = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el || el.clientHeight === 0) return;
+    const boxTop = el.getBoundingClientRect().top;
+    for (const row of Array.from(el.querySelectorAll<HTMLElement>("[data-msg-ts]"))) {
+      const r = row.getBoundingClientRect();
+      if (r.bottom > boxTop) {                 // first row still on screen
+        anchorRef.current = { ts: row.dataset.msgTs!, top: r.top - boxTop };
+        return;
+      }
+    }
+    anchorRef.current = null;
+  }, []);
+
   // Track whether the user is pinned to the bottom. If they scroll up we stop
   // auto-following and reveal the "jump to latest" button.
   const onScroll = useCallback(() => {
@@ -110,8 +152,9 @@ export function ChatTab() {
     if (!el) return;
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
     stickRef.current = atBottom;
+    captureAnchor();
     setShowJump(!atBottom); // no-op re-render when value is unchanged (React bails)
-  }, []);
+  }, [captureAnchor]);
 
   // Bring a new turn into view once, as it starts — then hold position. Chasing
   // streaming output drags text out from under the reader while they are reading
@@ -152,9 +195,10 @@ export function ChatTab() {
       if (!el || el.clientHeight === 0) return;
       const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
       stickRef.current = atBottom;
+      if (!atBottom) captureAnchor();
       setShowJump(!atBottom);
     });
-  }, [pending, streaming]);
+  }, [pending, streaming, captureAnchor]);
 
   // Reset paging and snap to the newest message on identity switch / first load.
   // The tab is `forceMount`ed and hidden with display:none when not active, so
@@ -164,7 +208,10 @@ export function ChatTab() {
   // tab becomes visible again).
   const pendingSnapRef = useRef(false);
   useEffect(() => {
-    setVisible(PAGE);
+    // Fold everything but the newest page, naming the boundary message. Set
+    // once per identity/load and then held: later arrivals must not move it.
+    const msgs = historyData?.messages ?? [];
+    setTopTs(msgs.length > PAGE ? (msgs[msgs.length - PAGE].timestamp || null) : null);
     stickRef.current = true;
     setShowJump(false);
     pendingSnapRef.current = true;
@@ -174,6 +221,11 @@ export function ChatTab() {
       el.scrollTop = el.scrollHeight;
       pendingSnapRef.current = false;
     });
+    // historyData.messages.length is read but deliberately not a dependency:
+    // this boundary is set once per identity/load and must then stay put.
+    // Recomputing it whenever a message arrives is exactly the sliding window
+    // this replaced.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [identityId, isLoading]);
 
   // When the tab becomes visible again (display:none → laid out), pay off a
@@ -207,6 +259,30 @@ export function ChatTab() {
       document.removeEventListener("visibilitychange", onVis);
     };
   }, []);
+
+  // Hold the reader on the same message across any change to the list.
+  //
+  // The disruptive one is the retention trim in useHistoryAppender: finishing a
+  // turn replaces the cache with the newest 15 turns, which on a long
+  // conversation drops a hundred-plus messages from the *front* in a single
+  // commit. All that height vanishes from above the viewport, scrollHeight
+  // collapses, and the browser clamps scrollTop to the new maximum — landing
+  // the reader at the bottom. Re-aligning the anchor row cancels it exactly.
+  //
+  // Runs before paint, so the wrong position is never displayed.
+  useIsoLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el || el.clientHeight === 0) return;
+    if (stickRef.current) return;          // genuinely at the bottom — stay there
+    const a = anchorRef.current;
+    if (!a) return;
+    const row = el.querySelector<HTMLElement>(
+      `[data-msg-ts="${CSS.escape(a.ts)}"]`,
+    );
+    if (!row) return;                      // anchor itself is gone — nothing to align
+    const delta = row.getBoundingClientRect().top - el.getBoundingClientRect().top - a.top;
+    if (delta) el.scrollTop += delta;
+  }, [allMessages]);
 
   useEffect(
     () => () => {
@@ -291,7 +367,6 @@ export function ChatTab() {
     ]);
     setStreaming(true);
     turnInFlight.current = true;
-    setVisible((v) => v + 2);
     stickRef.current = true; // a new turn always follows to the bottom
     setShowJump(false);
     outcomeRef.current = {
@@ -381,7 +456,7 @@ export function ChatTab() {
 
   // Map assistant message → preceding user timestamp for the context button.
   function userTsBefore(idx: number): string | null {
-    const globalIdx = allMessages.length - shown.length + idx;
+    const globalIdx = hiddenCount + idx;
     const prev = allMessages[globalIdx - 1];
     if (prev?.role === "user" && prev.timestamp && traceSet.has(prev.timestamp)) return prev.timestamp;
     return null;
@@ -408,7 +483,7 @@ export function ChatTab() {
             <>
               {hiddenCount > 0 && (
                 <div className="flex justify-center py-2">
-                  <Button size="sm" variant="secondary" onClick={() => setVisible((v) => v + PAGE)}>
+                  <Button size="sm" variant="secondary" onClick={() => setTopTs(allMessages[Math.max(0, hiddenCount - PAGE)]?.timestamp ?? null)}>
                     Load older ({hiddenCount})
                   </Button>
                 </div>
