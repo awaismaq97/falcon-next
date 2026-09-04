@@ -260,7 +260,10 @@ export function useWatcherResultPoller(
           return;
         }
 
-        // Append the injected result directly into the history cache.
+        // Place the injected result directly under the message whose command
+        // produced it. A slow tool (research runs for minutes) finishes long
+        // after its own turn, so appending would file the answer beneath
+        // whatever the user happened to say next.
         qc.setQueryData<{ identity_id: string; messages: unknown[]; count: number }>(
           qk.history(id),
           (old) => {
@@ -271,11 +274,27 @@ export function useWatcherResultPoller(
               timestamp: msg.timestamp ?? "",
               _watcher: true,
             };
-            return {
-              ...old,
-              messages: [...old.messages, newMsg],
-              count: old.count + 1,
-            };
+            const parentTs: string = msg.parent_ts ?? "";
+            const messages = [...old.messages];
+            let at = messages.length;
+            if (parentTs) {
+              const pIdx = messages.findIndex(
+                (m) => (m as { timestamp?: string }).timestamp === parentTs,
+              );
+              if (pIdx !== -1) {
+                // Land after the parent and after any results already filed
+                // under it, so several commands in one message stay in order.
+                at = pIdx + 1;
+                while (
+                  at < messages.length &&
+                  (messages[at] as { _watcher?: boolean })._watcher
+                ) {
+                  at += 1;
+                }
+              }
+            }
+            messages.splice(at, 0, newMsg);
+            return { ...old, messages, count: old.count + 1 };
           }
         );
         // Also refresh the watcher log panel.

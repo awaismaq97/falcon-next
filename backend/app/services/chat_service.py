@@ -254,7 +254,23 @@ def build_assembled_payload(req: ChatSendRequest) -> dict:
             logger.warning("chat: watcher persona injection failed for identity=%s: %s", identity_id, exc)
 
     history = Identity.load_history(identity_id)
-    messages_for_model = [{"role": m["role"], "content": m["content"]} for m in history]
+    # Past command blocks are neutralised on the way in. They have already been
+    # executed; leaving them verbatim hands the model a transcript of worked
+    # examples in the exact syntax the persona asks for, and it copies them —
+    # which is what filled conversations with agent output. See
+    # falcon.watcher.defuse_markers.
+    try:
+        from falcon.watcher import defuse_markers
+        messages_for_model = [
+            {
+                "role": m["role"],
+                "content": defuse_markers(m["content"]) if m["role"] == "assistant" else m["content"],
+            }
+            for m in history
+        ]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("chat: marker defusing failed for identity=%s: %s", identity_id, exc)
+        messages_for_model = [{"role": m["role"], "content": m["content"]} for m in history]
     # Attached documents are injected into this turn's user message (after memory
     # retrieval, which queries on the typed text only) so the model can read them.
     current_content = _compose_with_documents(req.message, getattr(req, "documents", None))

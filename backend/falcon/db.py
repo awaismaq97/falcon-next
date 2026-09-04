@@ -207,6 +207,9 @@ _INDEX_SPECS: list[tuple[str, object, dict]] = [
     # Correctness-critical: the claim mechanism in falcon.watcher._claim()
     ("watcher_processed", "msg_id", {"unique": True}),
     ("watcher_processed", "identity_id", {}),
+    # Repeat suppression (falcon.watcher._recently_run). Keyed by _id, so it
+    # needs no index of its own; this one is for housekeeping queries only.
+    ("watcher_recent", "ran_at", {}),
     # Tweets staged awaiting human confirmation. Unique so a code can never
     # address two different tweets.
     ("pending_tweets", "code", {"unique": True}),

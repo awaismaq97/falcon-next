@@ -150,6 +150,49 @@ def set_system_prompt(
     )
 
 
+def _place_watcher_results(docs: list[dict]) -> list[dict]:
+    """Move each injected agent result to sit directly under its own command.
+
+    A command's result is written whenever the tool finishes, which for anything
+    slow — research runs for minutes — can be several messages later. Ordered by
+    insertion alone the result therefore surfaces under whatever the user
+    happened to say next, which reads as though the assistant answered a
+    question nobody asked.
+
+    Results whose parent is not in this window (an old result, or one predating
+    the field) keep their insertion position, so nothing is ever dropped.
+    """
+    by_parent: dict = {}
+    rest: list[dict] = []
+    ids = {d.get("_id") for d in docs}
+    for d in docs:
+        parent = d.get("_watcher_parent")
+        if d.get("_watcher") and parent is not None and parent in ids:
+            by_parent.setdefault(parent, []).append(d)
+        else:
+            rest.append(d)
+
+    out: list[dict] = []
+    for d in rest:
+        out.append(d)
+        # Results follow their command in the order they were produced, which is
+        # the order the commands appeared in that message.
+        for child in by_parent.pop(d.get("_id"), []):
+            out.append(child)
+    # Any parent that fell outside the window: keep the orphans in place rather
+    # than lose them.
+    for orphans in by_parent.values():
+        out.extend(orphans)
+
+    # Internal plumbing — never part of the shape callers consume. `_watcher`
+    # itself stays: the UI styles on it and save_messages round-trips it.
+    for d in out:
+        d.pop("_id", None)
+        d.pop("_watcher_parent", None)
+        d.pop("_watcher_parent_ts", None)
+    return out
+
+
 def load_history(identity_id: str, limit: int = 2000) -> list[dict]:
     """Return the message history for identity_id in chronological order.
 
@@ -196,14 +239,14 @@ def load_history(identity_id: str, limit: int = 2000) -> list[dict]:
                 db["messages"]
                 .find(
                     {"identity_id": identity_id},
-                    {"_id": 0, "identity_id": 0},   # strip internal fields
+                    {"identity_id": 0},   # keep _id: needed to place results
                 )
                 .sort("_id", -1)   # newest first, uses (identity_id, _id) index
                 .limit(limit)
             )
             docs = list(cursor)
             docs.reverse()   # back to chronological order for the caller
-            return docs
+            return _place_watcher_results(docs)
         except _TRANSIENT_DB_ERRORS as exc:
             last_exc = exc
             if attempt < 2:
