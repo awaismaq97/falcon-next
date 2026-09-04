@@ -572,11 +572,46 @@ function WatcherLogPanel({ identityId, hideHeader }: { identityId: string; hideH
   const [personaOpen, setPersonaOpen] = useState(false);
 
   async function clearLog() {
-    if (!confirm("Clear watcher log for this identity?")) return;
+    if (
+      !confirm(
+        "Clear the watcher log for this identity?\n\n" +
+          "This removes the record of past runs only. The [AGENT RESULT] " +
+          "messages already sitting in the conversation stay where they are — " +
+          "use \"Purge results\" for those.",
+      )
+    )
+      return;
     try {
       await api.clearWatcherLog(identityId);
       qc.invalidateQueries({ queryKey: qk.watcherLog(identityId) });
       toast.success("Watcher log cleared.");
+    } catch (e) {
+      toast.error((e as Error).message);
+    }
+  }
+
+  // The log and the conversation are separate collections. Clearing the log
+  // never took the injected results out of the chat, which is why they looked
+  // undeletable.
+  async function purgeResults() {
+    if (
+      !confirm(
+        "Delete every agent result from this conversation?\n\n" +
+          "This removes the [AGENT RESULT] messages the watcher injected. " +
+          "Your own messages and the model's replies are untouched.\n\n" +
+          "This cannot be undone.",
+      )
+    )
+      return;
+    try {
+      const { deleted_count } = await api.clearWatcherResults(identityId);
+      qc.invalidateQueries({ queryKey: qk.history(identityId) });
+      qc.invalidateQueries({ queryKey: ["identities"] });
+      toast.success(
+        deleted_count === 0
+          ? "No agent results in this conversation."
+          : `${deleted_count} agent result${deleted_count === 1 ? "" : "s"} deleted.`,
+      );
     } catch (e) {
       toast.error((e as Error).message);
     }
@@ -601,6 +636,9 @@ function WatcherLogPanel({ identityId, hideHeader }: { identityId: string; hideH
             </Button>
             <Button size="sm" variant="ghost" onClick={() => setPersonaOpen(true)}>
               <FileText className="h-3.5 w-3.5" /> Persona
+            </Button>
+            <Button size="sm" variant="ghost" onClick={purgeResults} title="Delete the [AGENT RESULT] messages from the conversation">
+              <Trash2 className="h-3.5 w-3.5" /> Purge results
             </Button>
             {records.length > 0 && (
               <Button size="sm" variant="ghost" onClick={clearLog}>
@@ -631,6 +669,9 @@ function WatcherLogPanel({ identityId, hideHeader }: { identityId: string; hideH
           </Button>
           <Button size="sm" variant="ghost" onClick={() => setPersonaOpen(true)}>
             <FileText className="h-3.5 w-3.5" /> Persona
+          </Button>
+          <Button size="sm" variant="ghost" onClick={purgeResults} title="Delete the [AGENT RESULT] messages from the conversation">
+            <Trash2 className="h-3.5 w-3.5" /> Purge results
           </Button>
           {records.length > 0 && (
             <>

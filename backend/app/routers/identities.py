@@ -16,7 +16,9 @@ threadpool, keeping the event loop free.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 
+from bson import ObjectId
 from fastapi import APIRouter, HTTPException, Query
 
 import falcon.config as Config
@@ -194,20 +196,62 @@ def save_messages(identity_id: str, req: MessagesSaveRequest) -> dict:
     Insert-then-delete ordering so a mid-operation failure cannot destroy the
     conversation: write the new copy tagged with a batch marker FIRST, only then
     delete everything not in the batch, then strip the marker.
+
+    Two things this rewrite must carry across, both of which it used to drop:
+
+    ``_watcher`` — the flag marking a message as an injected agent result. The
+    watcher skips its own results when scanning for markers, and the UI renders
+    them differently. Rewriting without it turned every past agent result into
+    an ordinary assistant message.
+
+    The watcher's claim on each message. Claims in ``watcher_processed`` are
+    keyed on ``_id``, and a rewrite mints fresh ``_id``s for the whole
+    conversation — so after any edit the watcher saw the entire history as
+    unprocessed assistant messages and re-executed every ``[AGENT ...]`` marker
+    it had ever run, injecting a fresh pile of results (and re-firing real side
+    effects like post_tweet). Deleting those results rewrote the history again,
+    which produced yet another batch. Ids are therefore minted here and claimed
+    *before* the messages exist, leaving no window in which the watcher can see
+    a rewritten message as new work.
     """
     Identity._validate_identity_id(identity_id)
     db = get_db()
     batch = uuid.uuid4().hex
-    new_docs = [
-        {
+    new_docs = []
+    for e in req.entries:
+        doc = {
+            "_id": ObjectId(),
             "identity_id": identity_id,
             "timestamp": e.get("timestamp", ""),
             "role": e.get("role", "user"),
             "content": e.get("content", ""),
             "_rewrite_batch": batch,
         }
-        for e in req.entries
+        if e.get("_watcher"):
+            doc["_watcher"] = True
+        new_docs.append(doc)
+
+    # Pre-claim every assistant message. Historical content is never new work:
+    # its markers either already ran or were deliberately edited by an admin,
+    # and re-running them is wrong in both cases.
+    claims = [
+        {
+            "msg_id": d["_id"],
+            "identity_id": identity_id,
+            "processed_at": datetime.now(timezone.utc).isoformat(),
+            "claimed_by": "history-rewrite",
+        }
+        for d in new_docs
+        if d["role"] == "assistant"
     ]
+    if claims:
+        try:
+            db["watcher_processed"].insert_many(claims, ordered=False)
+        except Exception:  # noqa: BLE001
+            # Duplicate ids cannot happen (freshly minted), so a failure here is
+            # a transient DB problem. Refuse rather than write messages the
+            # watcher would treat as new work.
+            raise HTTPException(503, "Could not stage the rewrite — try again.")
     # On a replica set / Atlas the whole rewrite is one atomic commit. The
     # insert-then-delete batch ordering is kept so that even on standalone
     # mongod (no transaction) a mid-operation failure can't destroy the

@@ -345,6 +345,13 @@ export const api = {
       `/api/identities/${encodeURIComponent(id)}/watcher/log`,
       { method: "DELETE", headers: getAuthHeaders() },
     ),
+  // Removes the injected [AGENT RESULT] messages from the conversation itself.
+  // Clearing the log above only drops the record of the run.
+  clearWatcherResults: (id: string) =>
+    req<{ deleted_count: number }>(
+      `/api/identities/${encodeURIComponent(id)}/watcher/results`,
+      { method: "DELETE", headers: getAuthHeaders() },
+    ),
   setWatcherEnabled: (userId: string, enabled: boolean) =>
     req<{ user_id: string; identity_id: string; watcher_enabled: boolean; running: boolean }>(
       `/api/admin/users/${encodeURIComponent(userId)}/watcher`,

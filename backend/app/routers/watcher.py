@@ -775,6 +775,33 @@ def clear_watcher_log(
     return {"deleted_count": result.deleted_count}
 
 
+@router.delete("/identities/{identity_id}/watcher/results")
+def clear_watcher_results(
+    identity_id: str,
+    auth: dict = Depends(_require_any),
+) -> dict:
+    """Remove every injected agent result from one identity's conversation.
+
+    The watcher log and the conversation are separate collections: clearing the
+    log only hides the record of a run, it does not take the `[AGENT RESULT]`
+    message out of the chat. This deletes the messages themselves.
+
+    Only messages the watcher injected (`_watcher: true`) are touched — never a
+    message the user or the model wrote. Their claims in `watcher_processed` are
+    left in place: the claim is keyed on the message that *contained* the
+    marker, not on the result, so removing it would invite a re-run.
+    """
+    if auth.get("role") != "admin" and auth.get("identity_id") != identity_id:
+        raise HTTPException(403, "Access denied.")
+    db = get_db()
+    result = db["messages"].delete_many({"identity_id": identity_id, "_watcher": True})
+    logger.info(
+        "watcher: purged %d injected result(s) for identity=%r by %r",
+        result.deleted_count, identity_id, auth.get("username") or identity_id,
+    )
+    return {"deleted_count": result.deleted_count}
+
+
 # ---------------------------------------------------------------------------
 # Admin: enable/disable watcher per portal user
 # ---------------------------------------------------------------------------
