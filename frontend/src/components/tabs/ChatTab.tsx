@@ -124,25 +124,28 @@ export function ChatTab() {
     el.scrollTo({ top: el.scrollHeight, behavior: smooth ? "smooth" : "auto" });
   }, []);
 
-  // The row the reader is looking at, and where in the viewport it sits.
-  // Recorded as an element, not a pixel offset: the retention trim removes
-  // whole messages from the front of the list, so an offset measured before it
-  // means nothing afterwards, whereas "this message was 40px below the top"
-  // still does.
-  const anchorRef = useRef<{ ts: string; top: number } | null>(null);
+  // The rows the reader is looking at, and where in the viewport each one sits.
+  // Recorded as elements, not a pixel offset: the retention trim removes whole
+  // messages from the front of the list, so an offset measured before it means
+  // nothing afterwards, whereas "this message was 40px below the top" still does.
+  //
+  // Several candidates, not one, because the trim can take the topmost visible
+  // row with it. The first survivor is used, so losing the very row the reader
+  // was looking at still leaves something to align against.
+  const anchorRef = useRef<{ ts: string; top: number }[]>([]);
 
   const captureAnchor = useCallback(() => {
     const el = scrollRef.current;
     if (!el || el.clientHeight === 0) return;
     const boxTop = el.getBoundingClientRect().top;
+    const found: { ts: string; top: number }[] = [];
     for (const row of Array.from(el.querySelectorAll<HTMLElement>("[data-msg-ts]"))) {
       const r = row.getBoundingClientRect();
-      if (r.bottom > boxTop) {                 // first row still on screen
-        anchorRef.current = { ts: row.dataset.msgTs!, top: r.top - boxTop };
-        return;
-      }
+      if (r.bottom <= boxTop) continue;        // already scrolled past
+      found.push({ ts: row.dataset.msgTs!, top: r.top - boxTop });
+      if (found.length === 3) break;
     }
-    anchorRef.current = null;
+    anchorRef.current = found;
   }, []);
 
   // Track whether the user is pinned to the bottom. If they scroll up we stop
@@ -195,7 +198,12 @@ export function ChatTab() {
       if (!el || el.clientHeight === 0) return;
       const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
       stickRef.current = atBottom;
-      if (!atBottom) captureAnchor();
+      // Capture unconditionally. Anchoring only rows the reader had scrolled
+      // away from was the asymmetry behind "if I sit still it holds, if I scroll
+      // along it drops me at the bottom": reading a reply as it arrives keeps
+      // you inside the bottom band, so no anchor was ever recorded for the one
+      // moment that needed it.
+      captureAnchor();
       setShowJump(!atBottom);
     });
   }, [pending, streaming, captureAnchor]);
@@ -260,7 +268,7 @@ export function ChatTab() {
     };
   }, []);
 
-  // Hold the reader on the same message across any change to the list.
+  // Hold the reader on the same message across any change to the persisted list.
   //
   // The disruptive one is the retention trim in useHistoryAppender: finishing a
   // turn replaces the cache with the newest 15 turns, which on a long
@@ -269,20 +277,31 @@ export function ChatTab() {
   // collapses, and the browser clamps scrollTop to the new maximum — landing
   // the reader at the bottom. Re-aligning the anchor row cancels it exactly.
   //
+  // Unconditional, with no "…unless they were at the bottom" escape. Realigning
+  // is position-preserving by construction: everything from the anchor down is
+  // put back exactly where it was, so a reader who was at the bottom stays at
+  // the bottom and one who was mid-history stays mid-history. Skipping the work
+  // for readers near the bottom did not keep them there — it handed them to the
+  // browser's clamp, which is the jump being reported.
+  //
+  // Keyed on `history`, not `allMessages`: tokens arriving only extend the last
+  // row downwards, which shifts nothing above the reader and so needs no
+  // compensation, while running this on every chunk would race the user's own
+  // scrolling (scroll events land a frame after the scrollTop they describe).
+  //
   // Runs before paint, so the wrong position is never displayed.
   useIsoLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el || el.clientHeight === 0) return;
-    if (stickRef.current) return;          // genuinely at the bottom — stay there
-    const a = anchorRef.current;
-    if (!a) return;
-    const row = el.querySelector<HTMLElement>(
-      `[data-msg-ts="${CSS.escape(a.ts)}"]`,
-    );
-    if (!row) return;                      // anchor itself is gone — nothing to align
-    const delta = row.getBoundingClientRect().top - el.getBoundingClientRect().top - a.top;
-    if (delta) el.scrollTop += delta;
-  }, [allMessages]);
+    const boxTop = el.getBoundingClientRect().top;
+    for (const a of anchorRef.current) {
+      const row = el.querySelector<HTMLElement>(`[data-msg-ts="${CSS.escape(a.ts)}"]`);
+      if (!row) continue;                  // this one was trimmed — try the next
+      const delta = row.getBoundingClientRect().top - boxTop - a.top;
+      if (delta) el.scrollTop += delta;
+      return;
+    }
+  }, [history]);
 
   useEffect(
     () => () => {
@@ -397,6 +416,12 @@ export function ChatTab() {
     const o = outcomeRef.current;
     const canAppend =
       !!o && o.done && !o.error && !o.suppressed && !!o.userTs && !!o.asstTs;
+
+    // Re-read the reader's position from the live DOM immediately before the
+    // cache is rewritten. The streaming measurement runs on an animation frame,
+    // so the last one can predate the final tokens; this is the only reading
+    // guaranteed to describe what is actually on screen when the trim lands.
+    captureAnchor();
     const appended = canAppend
       ? appendHistory(identityId, [
           { role: "user", content: o!.userText, timestamp: o!.userTs },
