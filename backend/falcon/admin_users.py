@@ -30,7 +30,14 @@ from datetime import datetime, timezone
 
 from bson import ObjectId
 
-from falcon.admin_auth import decrypt_username, encrypt_username, hash_password
+from pymongo.errors import DuplicateKeyError
+
+from falcon.admin_auth import (
+    decrypt_username,
+    encrypt_username,
+    hash_password,
+    username_index,
+)
 from falcon.db import get_db
 
 # ---------------------------------------------------------------------------
@@ -84,6 +91,7 @@ def _serialize(doc: dict) -> dict:
     except Exception:
         out["username"] = "<encrypted>"
     out.pop("username_enc", None)
+    out.pop("username_hmac", None)  # lookup token — never leaves the server
     out.pop("password_hash", None)  # never return the hash
     # Every flag, defaults included, so the UI can render a checkbox per feature
     # rather than only for the ones this account happens to have stored.
@@ -107,29 +115,38 @@ def seed_first_admin(username: str, password: str, identity_id: str = "default")
     db = get_db()
     if db["admin_users"].count_documents({}) > 0:
         return  # already seeded
-    db["admin_users"].insert_one(
-        {
-            "username_enc": encrypt_username(username),
-            "password_hash": hash_password(password),
-            "role": "admin",
-            "identity_id": identity_id,   # maps this admin to the 'default' identity
-            "created_at": _utc_now(),
-            "disabled": False,
-        }
-    )
+    try:
+        db["admin_users"].insert_one(
+            {
+                "username_enc": encrypt_username(username),
+                "username_hmac": username_index(username),
+                "password_hash": hash_password(password),
+                "role": "admin",
+                "identity_id": identity_id,   # maps this admin to the 'default' identity
+                "created_at": _utc_now(),
+                "disabled": False,
+            }
+        )
+    except DuplicateKeyError:
+        # Two workers booting at once both saw an empty collection. The unique
+        # index settled it; the loser has nothing to do.
+        return
 
 
 def get_admin_by_username(username: str) -> dict | None:
-    """Find an admin by username. Returns the raw DB doc (with hash) for auth."""
-    db = get_db()
-    for doc in db["admin_users"].find({"disabled": {"$ne": True}}):
-        try:
-            if decrypt_username(doc["username_enc"]) == username:
-                doc["_id"] = str(doc["_id"])
-                return doc
-        except Exception:
-            continue
-    return None
+    """Find an admin by username. Returns the raw DB doc (with hash) for auth.
+
+    One indexed lookup. This used to iterate the collection decrypting every row,
+    which meant an unauthenticated login attempt cost an AES operation per
+    account on the system.
+    """
+    doc = get_db()["admin_users"].find_one(
+        {"username_hmac": username_index(username), "disabled": {"$ne": True}}
+    )
+    if not doc:
+        return None
+    doc["_id"] = str(doc["_id"])
+    return doc
 
 
 def list_admins() -> list[dict]:
@@ -148,47 +165,52 @@ def create_portal_user(
     features: dict[str, bool] | None = None,
     display_name: str = "",
 ) -> str:
-    """Create a portal user. Returns the inserted _id as a string."""
-    db = get_db()
-    # Check for duplicate username
-    for doc in db["portal_users"].find({"disabled": {"$ne": True}}):
-        try:
-            if decrypt_username(doc["username_enc"]) == username:
-                raise ValueError(f"Username '{username}' already exists.")
-        except ValueError:
-            raise
-        except Exception:
-            continue
+    """Create a portal user. Returns the inserted _id as a string.
 
+    Uniqueness is the unique index on ``username_hmac``, not a prior lookup. The
+    check-then-insert this replaced could be raced by two concurrent creates —
+    both scans found nothing, both inserted — and it only scanned enabled
+    accounts, so a name could also be duplicated onto a disabled one.
+    """
+    username = (username or "").strip()
+    if not username:
+        raise ValueError("Username cannot be empty.")
+
+    db = get_db()
     merged_features = {**DEFAULT_FEATURES, **(features or {})}
     # The portal user's identity_id is their username — each user gets their
     # own isolated conversation / memory / audit namespace in MongoDB.
-    result = db["portal_users"].insert_one(
-        {
-            "username_enc": encrypt_username(username),
-            "password_hash": hash_password(password),
-            "display_name": display_name,
-            "identity_id": username,       # maps this user to their own identity
-            "features": merged_features,
-            "disabled": False,
-            "created_at": _utc_now(),
-            "updated_at": _utc_now(),
-        }
-    )
+    try:
+        result = db["portal_users"].insert_one(
+            {
+                "username_enc": encrypt_username(username),
+                "username_hmac": username_index(username),
+                "password_hash": hash_password(password),
+                "display_name": display_name,
+                "identity_id": username,       # maps this user to their own identity
+                "features": merged_features,
+                "disabled": False,
+                "created_at": _utc_now(),
+                "updated_at": _utc_now(),
+            }
+        )
+    except DuplicateKeyError:
+        raise ValueError(f"Username '{username}' already exists.") from None
     return str(result.inserted_id)
 
 
 def get_portal_user_by_username(username: str) -> dict | None:
-    """Find a portal user by username. Returns raw DB doc (with hash) for auth."""
-    db = get_db()
-    for doc in db["portal_users"].find({"disabled": {"$ne": True}}):
-        try:
-            if decrypt_username(doc["username_enc"]) == username:
-                doc["_id"] = str(doc["_id"])
-                return doc
-        except Exception:
-            continue
-    return None
+    """Find a portal user by username. Returns raw DB doc (with hash) for auth.
+
+    One indexed lookup — see ``get_admin_by_username`` for why this is not a scan.
+    """
+    doc = get_db()["portal_users"].find_one(
+        {"username_hmac": username_index(username), "disabled": {"$ne": True}}
+    )
+    if not doc:
+        return None
+    doc["_id"] = str(doc["_id"])
+    return doc
 
 
 def get_portal_user_by_id(user_id: str) -> dict | None:
@@ -209,7 +231,13 @@ def list_portal_users() -> list[dict]:
 
 
 def update_portal_user(user_id: str, patch: dict) -> bool:
-    """Update editable fields on a portal user. Returns True on success."""
+    """Update editable fields on a portal user.
+
+    Returns whether the user exists, not whether anything changed. Those differ
+    whenever a field is set to the value it already holds — and reporting that
+    as failure made ``disable_portal_user`` return False for an account that was
+    already disabled, i.e. report failure for the state the caller asked for.
+    """
     try:
         oid = ObjectId(user_id)
     except Exception:
@@ -219,13 +247,27 @@ def update_portal_user(user_id: str, patch: dict) -> bool:
     if "password" in patch:
         update["$set"]["password_hash"] = hash_password(patch.pop("password"))
     if "username" in patch:
-        update["$set"]["username_enc"] = encrypt_username(patch.pop("username"))
+        # The blind index has to be rewritten with the ciphertext or the account
+        # becomes unfindable at login — the two are one value stored twice.
+        new_name = (patch.pop("username") or "").strip()
+        if not new_name:
+            raise ValueError("Username cannot be empty.")
+        update["$set"]["username_enc"] = encrypt_username(new_name)
+        update["$set"]["username_hmac"] = username_index(new_name)
+        # identity_id is deliberately NOT rewritten. It is the key every
+        # conversation, memory entry, document and audit record is filed under,
+        # so re-pointing it on a rename would orphan the account's entire
+        # history. It stays as issued; that it started life equal to the
+        # username is an origin, not an invariant.
     if "display_name" in patch:
         update["$set"]["display_name"] = patch.pop("display_name")
     if "disabled" in patch:
         update["$set"]["disabled"] = bool(patch.pop("disabled"))
-    result = db["portal_users"].update_one({"_id": oid}, update)
-    return result.modified_count > 0
+    try:
+        result = db["portal_users"].update_one({"_id": oid}, update)
+    except DuplicateKeyError:
+        raise ValueError("That username is already taken.") from None
+    return result.matched_count > 0
 
 
 def disable_portal_user(user_id: str) -> bool:
@@ -253,6 +295,9 @@ def set_user_features(user_id: str, features: dict[str, bool]) -> bool:
     db = get_db()
     result = db["portal_users"].update_one(
         {"_id": oid},
-        {"$set": {"features": features, "updated_at": _utc_now()}},
+        {"$set": {"features": merge_features(features), "updated_at": _utc_now()}},
     )
-    return result.modified_count >= 0  # 0 modified is fine if nothing changed
+    # matched, not modified: re-saving the same flags is a success, and
+    # `modified_count >= 0` — what this used to return — is true unconditionally,
+    # so the caller could never detect a bad user_id.
+    return result.matched_count > 0

@@ -19,12 +19,13 @@ import uuid
 from datetime import datetime, timezone
 
 from bson import ObjectId
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 import falcon.config as Config
 import falcon.identity as Identity
 import falcon.logger as Logger
 import falcon.memory as Memory
+from app.deps import is_admin, require_identity, require_user
 from app.schemas import (
     IdentityCreateRequest,
     MessagesSaveRequest,
@@ -51,7 +52,22 @@ def _message_counts() -> dict[str, int]:
 
 
 @router.get("/identities")
-def list_identities() -> dict:
+def list_identities(auth: dict = Depends(require_user)) -> dict:
+    """Identities the caller may open.
+
+    A portal user sees exactly one: their own. The full list is an admin view —
+    identity ids are usernames, so returning all of them to everyone published
+    the user directory and handed out the keys every other endpoint takes.
+    """
+    if not is_admin(auth):
+        own = (auth.get("identity_id") or "default").strip()
+        Logger.enforce_retention(own)
+        counts = _message_counts()
+        return {
+            "identities": [{"identity_id": own, "message_count": counts.get(own, 0)}],
+            "default": own,
+        }
+
     ids = Identity.list_identities()
     # Ensure the always-present default identity is included.
     id_set = set(ids) | {"default"}
@@ -70,7 +86,14 @@ def list_identities() -> dict:
 
 
 @router.post("/identities", status_code=201)
-def create_identity(req: IdentityCreateRequest) -> dict:
+def create_identity(
+    req: IdentityCreateRequest,
+    auth: dict = Depends(require_user),
+) -> dict:
+    # Creating an identity creates a data namespace that no portal account is
+    # bound to, so only an admin may do it.
+    if not is_admin(auth):
+        raise HTTPException(403, "Only an administrator can create an identity.")
     new_id = req.identity_id.strip()
     if not new_id:
         raise HTTPException(400, "Identity name is required.")
@@ -95,7 +118,15 @@ def create_identity(req: IdentityCreateRequest) -> dict:
 
 
 @router.delete("/identities/{identity_id}")
-def delete_identity(identity_id: str) -> dict:
+def delete_identity(
+    auth: dict = Depends(require_user),
+    identity_id: str = Depends(require_identity),
+) -> dict:
+    # Deleting an identity cascades across every collection. Even for their own
+    # data that is an admin action — a portal user has Clear for the reversible
+    # part, and nothing that removes the account's namespace outright.
+    if not is_admin(auth):
+        raise HTTPException(403, "Only an administrator can delete an identity.")
     if identity_id == "default":
         raise HTTPException(400, "The 'default' identity cannot be deleted.")
     Identity._validate_identity_id(identity_id)  # raises ValueError → 400
@@ -115,8 +146,8 @@ def delete_identity(identity_id: str) -> dict:
 
 @router.get("/identities/{identity_id}/history")
 def load_history(
-    identity_id: str,
     limit: int = Query(2000, ge=1, le=5000),
+    identity_id: str = Depends(require_identity),
 ) -> dict:
     Identity._validate_identity_id(identity_id)
     history = Identity.load_history(identity_id, limit=limit)
@@ -124,7 +155,9 @@ def load_history(
 
 
 @router.post("/identities/{identity_id}/clear")
-def clear_conversation(identity_id: str) -> dict:
+def clear_conversation(
+    identity_id: str = Depends(require_identity),
+) -> dict:
     """Clear conversation, traces, tokens, audit, non-persona memory, summary."""
     Identity._validate_identity_id(identity_id)
     db = get_db()
@@ -142,7 +175,9 @@ def clear_conversation(identity_id: str) -> dict:
 
 
 @router.get("/identities/{identity_id}/system-prompt")
-def get_system_prompt(identity_id: str) -> dict:
+def get_system_prompt(
+    identity_id: str = Depends(require_identity),
+) -> dict:
     """Return this identity's saved system prompt, or the config default.
 
     `exists` is False when nothing has been saved yet for this identity — the
@@ -164,7 +199,10 @@ def get_system_prompt(identity_id: str) -> dict:
 
 
 @router.put("/identities/{identity_id}/system-prompt")
-def save_system_prompt(identity_id: str, req: SystemPromptSaveRequest) -> dict:
+def save_system_prompt(
+    req: SystemPromptSaveRequest,
+    identity_id: str = Depends(require_identity),
+) -> dict:
     """Persist this identity's system prompt + toggle to the database."""
     Identity._validate_identity_id(identity_id)
     Identity.set_system_prompt(identity_id, req.system_prompt, req.use_system_prompt)
@@ -177,7 +215,9 @@ def save_system_prompt(identity_id: str, req: SystemPromptSaveRequest) -> dict:
 
 
 @router.get("/identities/{identity_id}/tokens")
-def get_tokens(identity_id: str) -> dict:
+def get_tokens(
+    identity_id: str = Depends(require_identity),
+) -> dict:
     db = get_db()
     doc = db["tokens"].find_one({"identity_id": identity_id}, {"_id": 0})
     if not doc:
@@ -190,7 +230,10 @@ def get_tokens(identity_id: str) -> dict:
 
 
 @router.put("/identities/{identity_id}/messages")
-def save_messages(identity_id: str, req: MessagesSaveRequest) -> dict:
+def save_messages(
+    req: MessagesSaveRequest,
+    identity_id: str = Depends(require_identity),
+) -> dict:
     """Full rewrite of an identity's messages (Logs editor + single delete).
 
     Insert-then-delete ordering so a mid-operation failure cannot destroy the

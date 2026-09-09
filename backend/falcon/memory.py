@@ -122,6 +122,22 @@ def add_memory(
     return str(result.inserted_id)
 
 
+def get_memory(memory_id: str) -> dict | None:
+    """One memory entry by id, or None if there is no such entry.
+
+    Exists so a caller that was given only an entry id can find out which
+    identity owns it — the API routes addressed by ``memory_id`` have no other
+    way to check that the requester is entitled to it. A malformed id is a miss,
+    not an error: it means the same thing to every caller.
+    """
+    try:
+        oid = ObjectId(memory_id)
+    except Exception:  # noqa: BLE001 — not an id, so not an entry
+        return None
+    doc = get_db()["memory"].find_one({"_id": oid})
+    return _doc_to_dict(doc) if doc else None
+
+
 def update_memory(
     memory_id: str,
     content: str | None = None,

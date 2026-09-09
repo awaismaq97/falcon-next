@@ -9,15 +9,18 @@ Backs three UI surfaces:
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from falcon.db import get_db
 
+from app.deps import require_identity, require_optional_identity
 router = APIRouter(tags=["traces"])
 
 
 @router.get("/identities/{identity_id}/trace-index")
-def trace_index(identity_id: str) -> dict:
+def trace_index(
+    identity_id: str = Depends(require_identity),
+) -> dict:
     """Return the set of user_timestamps that have a trace (timestamps only)."""
     db = get_db()
     cursor = (
@@ -30,9 +33,9 @@ def trace_index(identity_id: str) -> dict:
 
 @router.get("/identities/{identity_id}/traces")
 def list_traces(
-    identity_id: str,
     limit: int = Query(25, ge=1, le=200),
     skip: int = Query(0, ge=0),
+    identity_id: str = Depends(require_identity),
 ) -> dict:
     db = get_db()
     cursor = (
@@ -48,7 +51,9 @@ def list_traces(
 
 
 @router.get("/identities/{identity_id}/context/latest")
-def latest_context(identity_id: str) -> dict:
+def latest_context(
+    identity_id: str = Depends(require_identity),
+) -> dict:
     """Most recent turn's context snapshot for the Context tab."""
     db = get_db()
     doc = db["traces"].find_one(
@@ -67,7 +72,10 @@ def latest_context(identity_id: str) -> dict:
 
 
 @router.get("/identities/{identity_id}/traces/{user_ts}")
-def get_trace(identity_id: str, user_ts: str) -> dict:
+def get_trace(
+    user_ts: str,
+    identity_id: str = Depends(require_identity),
+) -> dict:
     db = get_db()
     doc = db["traces"].find_one(
         {"identity_id": identity_id, "user_timestamp": user_ts},
@@ -79,7 +87,10 @@ def get_trace(identity_id: str, user_ts: str) -> dict:
 
 
 @router.get("/identities/{identity_id}/traces/{user_ts}/payload")
-def get_trace_payload(identity_id: str, user_ts: str) -> dict:
+def get_trace_payload(
+    user_ts: str,
+    identity_id: str = Depends(require_identity),
+) -> dict:
     """The exact assembled payload sent to the model for this turn."""
     db = get_db()
     doc = db["traces"].find_one(
@@ -97,7 +108,10 @@ def get_trace_payload(identity_id: str, user_ts: str) -> dict:
 
 
 @router.delete("/identities/{identity_id}/traces/{user_ts}")
-def delete_trace(identity_id: str, user_ts: str) -> dict:
+def delete_trace(
+    user_ts: str,
+    identity_id: str = Depends(require_identity),
+) -> dict:
     db = get_db()
     db["traces"].delete_one({"identity_id": identity_id, "user_timestamp": user_ts})
     return {"deleted": user_ts}

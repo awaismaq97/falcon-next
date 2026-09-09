@@ -43,60 +43,40 @@ from sse_starlette.sse import EventSourceResponse
 import falcon.watcher as Watcher
 import falcon.watcher_tools as WatcherTools
 import falcon.admin_users as AdminUsers
+from app.deps import (
+    authorize_identity,
+    require_admin,
+    require_feature,
+    require_identity,
+    require_user,
+)
 from falcon.admin_auth import decode_access_token
 from falcon.db import get_db
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["watcher"])
+
+# The SSE stream is mounted separately, without the blanket
+# `Depends(require_user)` the other routers carry, because EventSource cannot
+# send an Authorization header — see `watcher_stream` for how it authenticates
+# instead. Nothing else belongs on this router.
+stream_router = APIRouter(tags=["watcher"])
+
 _bearer = HTTPBearer(auto_error=False)
 
 
 # ---------------------------------------------------------------------------
-# Auth helpers (mirrors admin.py — no circular import needed)
+# Auth helpers
 # ---------------------------------------------------------------------------
+# These were a local copy of the same logic admin.py had, written before there
+# was one place to put it. They are now thin aliases over `app.deps`, which is
+# the single definition — kept under their original names so the twenty-six
+# route signatures below did not all have to change to adopt it.
 
-def _decode(creds: HTTPAuthorizationCredentials) -> dict:
-    try:
-        return decode_access_token(creds.credentials)
-    except JWTError:
-        raise HTTPException(401, "Invalid or expired authentication token.")
-
-
-def _require_any(creds: HTTPAuthorizationCredentials = Depends(_bearer)) -> dict:
-    if not creds:
-        raise HTTPException(401, "Authentication required.")
-    return _decode(creds)
-
-
-def _require_admin(creds: HTTPAuthorizationCredentials = Depends(_bearer)) -> dict:
-    if not creds:
-        raise HTTPException(401, "Authentication required.")
-    payload = _decode(creds)
-    if payload.get("role") != "admin":
-        raise HTTPException(403, "Admin access required.")
-    return payload
-
-
-def _require_agents_feature(auth: dict = Depends(_require_any)) -> dict:
-    """Allow only accounts the admin has given the ``agents`` feature.
-
-    Read from the database on every call rather than from the JWT: features are
-    not in the token, and a token issued before the admin revoked the feature
-    would otherwise keep working for its full lifetime. Hiding the tab in the
-    frontend is presentation; this is the part that actually stops a run.
-    """
-    if auth.get("role") == "admin":
-        return auth
-
-    user = AdminUsers.get_portal_user_by_id(str(auth.get("sub") or ""))
-    if not user or not (user.get("features") or {}).get("agents", False):
-        raise HTTPException(
-            403,
-            "Running agents directly is not enabled for this account. "
-            "Ask an administrator to turn on the Watcher Agents feature.",
-        )
-    return auth
+_require_any = require_user
+_require_admin = require_admin
+_require_agents_feature = require_feature("agents")
 
 
 def _resolve_identity(auth: dict, requested: str) -> str:
@@ -106,13 +86,7 @@ def _resolve_identity(auth: dict, requested: str) -> str:
     storage, so an unchecked identity_id in the body would be a way to read and
     delete another user's documents.
     """
-    own = (auth.get("identity_id") or "default").strip()
-    asked = (requested or "").strip()
-    if auth.get("role") == "admin":
-        return asked or own
-    if asked and asked != own:
-        raise HTTPException(403, "You can only run agents against your own identity.")
-    return own
+    return authorize_identity(auth, requested)
 
 
 # ---------------------------------------------------------------------------
@@ -478,28 +452,24 @@ def global_watcher_log(
 
 @router.get("/identities/{identity_id}/watcher/status")
 def identity_watcher_status(
-    identity_id: str,
-    creds: HTTPAuthorizationCredentials = Depends(_bearer),
+    identity_id: str = Depends(require_identity),
 ) -> dict:
     """Is the watcher currently running for this identity?
 
-    Returns a safe response even when unauthenticated (running=False, enabled=False)
-    so the frontend polling doesn't produce a cascade of 401 errors when the
-    token is missing or expired.
+    This used to swallow every authentication failure and answer
+    ``running=False, enabled=False`` instead, so that the chat tab's polling
+    would not produce 401s before the token had loaded. Two things were wrong
+    with that. The fallback caught the identity check along with everything else,
+    which made this the one identity-scoped route that answered questions about
+    somebody else's account. And it was catching a NameError — the helper it
+    called no longer existed — so by the end it was returning the safe default
+    on *every* request, authenticated or not, and reporting every watcher as
+    stopped.
+
+    Authentication is now the router's job, so the handler does not need to
+    decode anything, and the polling concern is handled where it belongs: the
+    client stops polling when it has no session.
     """
-    # Unauthenticated — return safe defaults instead of 401 so the chat tab
-    # polling doesn't spam the logs when the JWT hasn't loaded yet.
-    if not creds:
-        return {"identity_id": identity_id, "running": False, "enabled": False}
-
-    try:
-        auth = _decode(creds)
-    except Exception:
-        return {"identity_id": identity_id, "running": False, "enabled": False}
-
-    if auth.get("role") != "admin" and auth.get("identity_id") != identity_id:
-        raise HTTPException(403, "Access denied.")
-
     running = Watcher.is_running(identity_id)
     db = get_db()
     # Check portal_users first, then admin_users, then watcher_settings fallback
@@ -517,7 +487,7 @@ def identity_watcher_status(
     }
 
 
-@router.get("/identities/{identity_id}/watcher/stream")
+@stream_router.get("/identities/{identity_id}/watcher/stream")
 async def watcher_stream(
     identity_id: str,
     token: str | None = Query(None),
@@ -526,27 +496,34 @@ async def watcher_stream(
     """SSE stream that pushes watcher results to the client instantly.
 
     The client connects once and keeps the connection open. Whenever the
-    watcher injects a [AGENT RESULT] message it is pushed here immediately —
-    no polling delay. The frontend appends it directly to the chat cache.
+    watcher injects an agent result it is pushed here immediately — no polling
+    delay. The frontend appends it directly to the chat cache.
 
-    Auth token accepted via Authorization header OR ?token= query param
-    (EventSource API does not support custom headers).
+    Auth is accepted via the Authorization header OR a ``?token=`` query
+    parameter, because the EventSource API cannot set headers. This is the only
+    endpoint that reads a token from the URL, and it is mounted on its own
+    router for that reason: a query-string token can end up in proxy and access
+    logs, so it is not something to enable API-wide.
 
     Sends a keepalive ping every 15 seconds to prevent proxy timeouts.
     """
     import json as _json
 
-    # Resolve token: header takes priority, fall back to query param
+    # Resolve token: header takes priority, fall back to query param.
+    #
+    # Both a missing token and an unparseable one used to fall through to the
+    # stream — the failure was explicit, `pass  # invalid token — allow through`.
+    # That made every identity's live agent results readable by anyone who knew
+    # a username, which is the one thing this stream must not permit, so it is
+    # now closed on every path.
     raw_token = (creds.credentials if creds else None) or token
-    if raw_token:
-        try:
-            auth = decode_access_token(raw_token)
-            if auth.get("role") != "admin" and auth.get("identity_id") != identity_id:
-                raise HTTPException(403, "Access denied.")
-        except HTTPException:
-            raise
-        except Exception:
-            pass  # invalid token — allow through, stream safe defaults
+    if not raw_token:
+        raise HTTPException(401, "Authentication required.")
+    try:
+        auth = decode_access_token(raw_token)
+    except JWTError:
+        raise HTTPException(401, "Invalid or expired authentication token.")
+    authorize_identity(auth, identity_id)
 
     loop = asyncio.get_running_loop()
     q: asyncio.Queue = asyncio.Queue()

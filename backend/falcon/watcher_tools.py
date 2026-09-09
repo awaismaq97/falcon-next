@@ -945,7 +945,10 @@ def _memory_status(payload: str) -> str:
         lines.append("- **Last write:** none recorded yet")
 
     try:
-        st = Store.stats()
+        # Scoped to the caller. An unscoped count reported the whole cluster's
+        # document total to whoever asked, which told one account how much other
+        # accounts had stored.
+        st = Store.stats(current_identity())
         by = ", ".join(f"{k}={v}" for k, v in sorted(st["by_source"].items())) or "none"
         lines.append(f"- **Documents:** {st['total']} stored ({by})")
     except Exception as exc:  # noqa: BLE001

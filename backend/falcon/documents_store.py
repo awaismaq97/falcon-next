@@ -376,20 +376,43 @@ def last_write() -> dict | None:
 
 
 # ---------------------------------------------------------------------------
+# Identity scoping
+# ---------------------------------------------------------------------------
+
+def _scope(identity_id: str) -> dict:
+    """The identity clause every read and delete must carry.
+
+    An empty identity used to mean "no filter", so `list_documents("")` returned
+    every document belonging to every account and `delete("doc_x", "")` removed
+    one belonging to anyone. That was reachable straight from the HTTP API, where
+    identity_id was an optional query parameter defaulting to "".
+
+    Unscoped access is no longer expressible: an empty identity raises rather
+    than widening. A caller that genuinely wants every document — the backup job,
+    a migration — filters for itself, deliberately, rather than by omission.
+    """
+    scoped = (identity_id or "").strip()
+    if not scoped:
+        raise ValueError(
+            "identity_id is required — an unscoped document query would reach "
+            "every account's files."
+        )
+    return {"identity_id": scoped}
+
+
+# ---------------------------------------------------------------------------
 # Retrieval
 # ---------------------------------------------------------------------------
 
-def get(storage_id: str, identity_id: str = "") -> dict | None:
+def get(storage_id: str, identity_id: str) -> dict | None:
     """One stored document, including its text."""
-    q: dict = {"storage_id": (storage_id or "").strip()}
-    if identity_id:
-        q["identity_id"] = identity_id
+    q: dict = {"storage_id": (storage_id or "").strip(), **_scope(identity_id)}
     return _coll().find_one(q, {"_id": 0})
 
 
-def list_documents(identity_id: str = "", limit: int = 50) -> list[dict]:
+def list_documents(identity_id: str, limit: int = 50) -> list[dict]:
     """Recent documents without their text, newest first."""
-    q = {"identity_id": identity_id} if identity_id else {}
+    q = _scope(identity_id)
     return list(
         _coll()
         .find(q, {"_id": 0, "text": 0})
@@ -415,15 +438,16 @@ def search(identity_id: str, query: str, limit: int = 20) -> list[dict]:
     rx = re.compile(re.escape(query), re.I)
     # Mongo applies a regex to each element of an array field, so this matches a
     # record whose *any* tag contains the term.
-    q: dict = {"$or": [{"title": rx}, {"tags": rx}, {"filename": rx}, {"text": rx}]}
-    if identity_id:
-        q["identity_id"] = identity_id
+    q: dict = {
+        "$or": [{"title": rx}, {"tags": rx}, {"filename": rx}, {"text": rx}],
+        **_scope(identity_id),
+    }
     return list(
         _coll().find(q, {"_id": 0, "text": 0}).sort("saved_at", -1).limit(max(1, min(100, limit)))
     )
 
 
-def get_file(storage_id: str, identity_id: str = "") -> dict | None:
+def get_file(storage_id: str, identity_id: str) -> dict | None:
     """The original uploaded bytes for a stored document, ready to serve.
 
     Returns None when the document does not exist, was stored as text only, or
@@ -449,11 +473,9 @@ def get_file(storage_id: str, identity_id: str = "") -> dict | None:
     return blob
 
 
-def delete(storage_id: str, identity_id: str = "") -> bool:
+def delete(storage_id: str, identity_id: str) -> bool:
     """Remove one document and its original file. The only thing that deletes stored content."""
-    q: dict = {"storage_id": (storage_id or "").strip()}
-    if identity_id:
-        q["identity_id"] = identity_id
+    q: dict = {"storage_id": (storage_id or "").strip(), **_scope(identity_id)}
 
     # Read the file id before the record goes, or the bytes become unreachable
     # garbage that nothing points at.

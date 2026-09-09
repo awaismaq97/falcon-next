@@ -13,10 +13,11 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.deps import require_admin, require_user
 from app.settings import get_settings
 
 logging.basicConfig(
@@ -65,11 +66,31 @@ async def lifespan(app: FastAPI):
                 bridge_exc,
             )
 
-        # Seed the default admin account on first boot (no-op if already exists).
+        # Seed the first admin account on a fresh database (no-op if one exists).
+        #
+        # Credentials come from the environment. They used to be literals in this
+        # file — anyone with the source, which includes anyone who has ever seen
+        # the repository, knew the admin password of every deployment that had
+        # not changed it, and there was nothing to prompt anyone to change it.
+        # No credentials configured means no seeding: an empty user table is a
+        # visible problem with a documented fix, a known password is neither.
         try:
             from falcon.admin_users import seed_first_admin
-            seed_first_admin("rgqt11", "rgqt11admin")
-            logger.info("Admin seed check complete")
+
+            seed_user = os.environ.get("FALCON_ADMIN_USERNAME", "").strip()
+            seed_pass = os.environ.get("FALCON_ADMIN_PASSWORD", "")
+            if seed_user and seed_pass:
+                seed_first_admin(seed_user, seed_pass)
+                logger.info("Admin seed check complete")
+            else:
+                from falcon.db import get_db as _get_db
+
+                if _get_db()["admin_users"].count_documents({}) == 0:
+                    logger.error(
+                        "No admin accounts exist and FALCON_ADMIN_USERNAME / "
+                        "FALCON_ADMIN_PASSWORD are not set — nobody can log in. "
+                        "Set both and restart to create the first admin."
+                    )
         except Exception as seed_exc:
             logger.warning("Admin seed skipped: %s", seed_exc)
 
@@ -202,7 +223,14 @@ def create_app() -> FastAPI:
         return {"status": "ok", "service": "falcon-api", "version": settings.app_version}
 
     @app.get("/debug-env", tags=["meta"])
-    async def debug_env():
+    async def debug_env(_: dict = Depends(require_admin)):
+        """Which secrets are present. Admin only, and names are never listed.
+
+        This was open to anyone and returned ``all_keys`` — every environment
+        variable name in the process. Masked values do not make that safe: the
+        names alone map the deployment, and the endpoint's whole purpose is to
+        confirm a misconfiguration, which is exactly what an attacker wants too.
+        """
         import os
         import falcon.config as Config
 
@@ -213,11 +241,12 @@ def create_app() -> FastAPI:
             "OPENROUTER_API_KEY": _mask(os.environ.get("OPENROUTER_API_KEY", "")),
             "OPENAI_API_KEY": _mask(os.environ.get("OPENAI_API_KEY", "")),
             "MONGODB_URI": _mask(os.environ.get("MONGODB_URI", "")),
+            "SECRET_KEY": _mask(os.environ.get("SECRET_KEY", "")),
+            "ELEVENLABS_API_KEY": _mask(os.environ.get("ELEVENLABS_API_KEY", "")),
             # Resolved background-task routing — this is what actually decides
             # whether summary + memory extraction hit OpenAI or OpenRouter.
             "background_use_openai": Config.background_use_openai,
             "openai_background_model": Config.openai_background_model,
-            "all_keys": [k for k in os.environ.keys()],
         }
 
     # ── Routers ────────────────────────────────────────────────────────────
@@ -239,20 +268,41 @@ def create_app() -> FastAPI:
     )
 
     prefix = settings.api_prefix
+
+    # Authentication is applied at the mount, not inside the handlers.
+    #
+    # Every router below except `admin` carries `Depends(require_user)` for the
+    # whole router, so a new route is protected the moment it is added and there
+    # is no per-handler decision to forget. That is the failure this replaced:
+    # auth used to be opt-in per route, and fifty-five routes across twelve
+    # routers had never opted in — the entire conversation, memory, audit,
+    # document and inference surface answered to any caller that could reach the
+    # port.
+    #
+    # `admin` is mounted bare because it owns /admin/login, which by definition
+    # cannot require a token. Its other routes declare their own dependency.
+    # `watcher` and `lumen` likewise already gate each route, several of them at
+    # admin level; the blanket dependency is added anyway so that neither an
+    # unguarded route nor a future one can slip through.
+    protected = [Depends(require_user)]
+
     app.include_router(admin.router, prefix=prefix)
-    app.include_router(config_router.router, prefix=prefix)
-    app.include_router(identities.router, prefix=prefix)
-    app.include_router(chat.router, prefix=prefix)
-    app.include_router(memory.router, prefix=prefix)
-    app.include_router(traces.router, prefix=prefix)
-    app.include_router(audit.router, prefix=prefix)
-    app.include_router(dual_run.router, prefix=prefix)
-    app.include_router(testing.router, prefix=prefix)
-    app.include_router(voice.router, prefix=prefix)
-    app.include_router(documents.router, prefix=prefix)
-    app.include_router(categories_router.router, prefix=prefix)
-    app.include_router(watcher_router.router, prefix=prefix)
-    app.include_router(lumen.router, prefix=prefix)
+    app.include_router(config_router.router, prefix=prefix, dependencies=protected)
+    app.include_router(identities.router, prefix=prefix, dependencies=protected)
+    app.include_router(chat.router, prefix=prefix, dependencies=protected)
+    app.include_router(memory.router, prefix=prefix, dependencies=protected)
+    app.include_router(traces.router, prefix=prefix, dependencies=protected)
+    app.include_router(audit.router, prefix=prefix, dependencies=protected)
+    app.include_router(dual_run.router, prefix=prefix, dependencies=protected)
+    app.include_router(testing.router, prefix=prefix, dependencies=protected)
+    app.include_router(voice.router, prefix=prefix, dependencies=protected)
+    app.include_router(documents.router, prefix=prefix, dependencies=protected)
+    app.include_router(categories_router.router, prefix=prefix, dependencies=protected)
+    app.include_router(watcher_router.router, prefix=prefix, dependencies=protected)
+    # Mounted bare: EventSource cannot send an Authorization header, so this one
+    # route reads its token from the query string and checks it itself.
+    app.include_router(watcher_router.stream_router, prefix=prefix)
+    app.include_router(lumen.router, prefix=prefix, dependencies=protected)
 
     return app
 

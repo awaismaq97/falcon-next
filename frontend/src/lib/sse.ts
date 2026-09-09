@@ -5,6 +5,7 @@
 // ReadableStream reader and parse SSE frames ourselves.
 
 import { API_BASE } from "./api";
+import { getAuthHeaders } from "./auth";
 import type { ChatSettings, DocAttachment, SSEEvent } from "./types";
 
 export interface SendParams {
@@ -23,7 +24,13 @@ export function streamChat(
   return (async () => {
     const res = await fetch(`${API_BASE}/api/chat/send`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+        // Inference is the most expensive endpoint in the app — it spends the
+        // deployment's OpenRouter credits — so it is not one to leave open.
+        ...getAuthHeaders(),
+      },
       body: JSON.stringify(params),
       signal,
     });

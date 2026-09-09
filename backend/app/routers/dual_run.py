@@ -7,11 +7,12 @@ total runs, breakthrough count/rate, and a per-state breakdown.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 
 import falcon.dual_run as DualRun
 from falcon.export_utils import make_export_envelope
 
+from app.deps import require_identity, require_optional_identity
 router = APIRouter(tags=["dual-run"])
 
 
@@ -41,19 +42,24 @@ def all_dual_runs(limit: int = Query(200, ge=1, le=1000)) -> dict:
 
 @router.get("/identities/{identity_id}/dual-run")
 def identity_dual_runs(
-    identity_id: str, limit: int = Query(200, ge=1, le=1000)
+    limit: int = Query(200, ge=1, le=1000),
+    identity_id: str = Depends(require_identity),
 ) -> dict:
     records = DualRun.read_records(identity_id, limit=limit)
     return {"records": records, "stats": _stats(records)}
 
 
 @router.get("/identities/{identity_id}/dual-run/export")
-def export_dual_runs(identity_id: str) -> dict:
+def export_dual_runs(
+    identity_id: str = Depends(require_identity),
+) -> dict:
     records = DualRun.read_records(identity_id, limit=1000)
     return make_export_envelope(identity_id=identity_id, data=records)
 
 
 @router.delete("/identities/{identity_id}/dual-run")
-def delete_dual_runs(identity_id: str) -> dict:
+def delete_dual_runs(
+    identity_id: str = Depends(require_identity),
+) -> dict:
     count = DualRun.delete_records(identity_id)
     return {"deleted_count": count}

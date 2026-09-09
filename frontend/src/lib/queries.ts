@@ -305,7 +305,24 @@ export function useWatcherResultPoller(
       }
     });
 
+    // EventSource reconnects on its own and cannot see the status code it
+    // failed with, so a rejected token looks exactly like a dropped connection —
+    // and it retries every few seconds forever. The stream now returns 401 to an
+    // expired token, which without a bound would be a permanent reconnect loop,
+    // each attempt firing another history refetch. A handful of tries covers a
+    // real network blip; past that the cause is not going to fix itself here,
+    // and an expired session is already being handled by the first API call to
+    // notice it.
+    let consecutiveErrors = 0;
+    es.addEventListener("open", () => {
+      consecutiveErrors = 0;
+    });
     es.onerror = () => {
+      consecutiveErrors += 1;
+      if (consecutiveErrors > 5) {
+        es.close();
+        return;
+      }
       // On connection error fall back to a single refetch so nothing is lost.
       qc.invalidateQueries({ queryKey: qk.history(id) });
     };

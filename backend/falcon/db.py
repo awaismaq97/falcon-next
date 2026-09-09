@@ -199,6 +199,13 @@ _INDEX_SPECS: list[tuple[str, object, dict]] = [
     # Admin system indexes
     ("admin_users", "created_at", {}),
     ("portal_users", "created_at", {}),
+    # Blind index over usernames (falcon.admin_auth.username_index). Unique
+    # because it is what makes duplicate accounts impossible: the check that
+    # preceded it was a scan followed by an insert, which two concurrent creates
+    # could both pass. Sparse so rows predating the migration — which have no
+    # username_hmac yet — do not all collide on null.
+    ("admin_users", "username_hmac", {"unique": True, "sparse": True}),
+    ("portal_users", "username_hmac", {"unique": True, "sparse": True}),
     ("admin_audit_log", "timestamp", {}),
     # Watcher indexes
     ("watcher_log", "identity_id", {}),

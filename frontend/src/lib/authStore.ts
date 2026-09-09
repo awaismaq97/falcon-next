@@ -9,6 +9,7 @@
 import { create } from "zustand";
 import type { AuthUser } from "./auth";
 import { clearAuth, isAuthenticated, setAuth, verifyToken, loginRequest } from "./auth";
+import { useSettings } from "./store";
 
 interface AuthState {
   /** True only during the initial JWT verification on app mount. */
@@ -30,10 +31,20 @@ interface AuthState {
 // store because store state changes cause useEffect deps to fire again.
 let _initialized = false;
 
+/** Pin the settings store to the identity this session is actually for.
+ *
+ * Synchronous, and it has to be. `identityId` is persisted to localStorage, so
+ * on a shared browser the store starts holding whoever logged in last. This used
+ * to be a dynamic `import().then()`, which resolved a tick *after* the caller
+ * set `isAuthenticated` — so AuthGuard rendered the app, every tab fired its
+ * queries against the previous user's identity, and the server answered 403 to
+ * all of them. It was invisible before only because nothing checked.
+ *
+ * The static import is safe: store.ts imports nothing from this module, so
+ * there is no cycle for the dynamic import to have been avoiding.
+ */
 function applyIdentityToStore(identity_id: string) {
-  import("./store").then(({ useSettings }) => {
-    useSettings.getState().setIdentity(identity_id);
-  });
+  useSettings.getState().setIdentity(identity_id);
 }
 
 export const useAuth = create<AuthState>()((set) => ({

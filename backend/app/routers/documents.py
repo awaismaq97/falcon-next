@@ -28,7 +28,9 @@ from __future__ import annotations
 import io
 import logging
 
-from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile
+
+from app.deps import require_optional_identity
 
 logger = logging.getLogger("falcon.documents")
 
@@ -148,7 +150,11 @@ def _extract(name: str, ext: str, data: bytes) -> str:
 
 
 @router.get("/stored")
-async def list_stored(identity_id: str = "", q: str = "", limit: int = 50) -> dict:
+async def list_stored(
+    q: str = "",
+    limit: int = 50,
+    identity_id: str = Depends(require_optional_identity),
+) -> dict:
     """Documents durably stored for an identity, without their text."""
     from falcon import documents_store as Store
 
@@ -157,7 +163,10 @@ async def list_stored(identity_id: str = "", q: str = "", limit: int = 50) -> di
 
 
 @router.get("/stored/{storage_id}")
-async def get_stored(storage_id: str, identity_id: str = "") -> dict:
+async def get_stored(
+    storage_id: str,
+    identity_id: str = Depends(require_optional_identity),
+) -> dict:
     """One stored document, including its full text."""
     from falcon import documents_store as Store
 
@@ -168,7 +177,11 @@ async def get_stored(storage_id: str, identity_id: str = "") -> dict:
 
 
 @router.get("/stored/{storage_id}/download")
-async def download_stored(storage_id: str, identity_id: str = "", inline: bool = False):
+async def download_stored(
+    storage_id: str,
+    inline: bool = False,
+    identity_id: str = Depends(require_optional_identity),
+):
     """The original uploaded file, byte for byte.
 
     This is the upload itself — the PDF with its layout, figures and pagination
@@ -215,7 +228,10 @@ async def download_stored(storage_id: str, identity_id: str = "", inline: bool =
 
 
 @router.delete("/stored/{storage_id}")
-async def delete_stored(storage_id: str, identity_id: str = "") -> dict:
+async def delete_stored(
+    storage_id: str,
+    identity_id: str = Depends(require_optional_identity),
+) -> dict:
     """Delete one stored document. The only thing that removes stored content."""
     from falcon import documents_store as Store
 
@@ -227,7 +243,7 @@ async def delete_stored(storage_id: str, identity_id: str = "") -> dict:
 @router.post("/extract")
 async def extract_document(
     file: UploadFile = File(...),
-    identity_id: str = Form(""),
+    identity_id: str = Depends(require_optional_identity),
 ) -> dict:
     data = await file.read()
     if not data:

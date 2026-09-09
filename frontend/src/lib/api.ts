@@ -44,13 +44,43 @@ function url(path: string) {
   return `${API_BASE}${path}`;
 }
 
+/** Sign out and return to the login screen.
+ *
+ * Every API call now requires a token, so an expired one fails the whole app at
+ * once rather than only the admin corners of it. Without this the user would sit
+ * in front of a fully rendered UI where each panel showed "Invalid or expired
+ * authentication token" — the reload is what turns that into the login form they
+ * can actually act on.
+ *
+ * A full reload rather than a store update: it also clears every cached query,
+ * so nothing from the previous session survives into the next login.
+ */
+function onUnauthorized(): void {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.removeItem("falcon-auth-token");
+    localStorage.removeItem("falcon-auth-user");
+  } catch {
+    /* private mode — the reload still lands on the login screen */
+  }
+  window.location.reload();
+}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response;
   try {
     res = await fetch(url(path), {
       ...init,
       signal: init?.signal ?? AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
-      headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+      headers: {
+        "Content-Type": "application/json",
+        // Authentication is a property of every request, not of the handful of
+        // endpoints that happened to ask for it. The backend now requires a
+        // token on every router, and attaching it here — rather than at each
+        // call site — is what makes that true for calls added later too.
+        ...getAuthHeaders(),
+        ...(init?.headers ?? {}),
+      },
     });
   } catch (e) {
     if (e instanceof DOMException && e.name === "TimeoutError") {
@@ -60,6 +90,10 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(`Network error: ${(e as Error).message}`);
   }
   if (!res.ok) {
+    if (res.status === 401) {
+      onUnauthorized();
+      throw new Error("Your session has expired. Please sign in again.");
+    }
     let detail = res.statusText;
     try {
       const body = await res.json();
@@ -80,7 +114,7 @@ async function audioReq(path: string, body: unknown): Promise<Blob> {
   try {
     res = await fetch(url(path), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...getAuthHeaders() },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(TTS_TIMEOUT_MS),
     });
@@ -91,6 +125,10 @@ async function audioReq(path: string, body: unknown): Promise<Blob> {
     throw new Error(`Network error: ${(e as Error).message}`);
   }
   if (!res.ok) {
+    if (res.status === 401) {
+      onUnauthorized();
+      throw new Error("Your session has expired. Please sign in again.");
+    }
     let detail = res.statusText;
     try {
       const err = await res.json();
@@ -162,6 +200,8 @@ export const api = {
     try {
       res = await fetch(url("/api/documents/extract"), {
         method: "POST",
+        // No Content-Type: the browser sets it with the multipart boundary.
+        headers: { ...getAuthHeaders() },
         body: fd,
         signal: AbortSignal.timeout(60_000),
       });
@@ -172,6 +212,10 @@ export const api = {
       throw new Error(`Network error: ${(e as Error).message}`);
     }
     if (!res.ok) {
+      if (res.status === 401) {
+        onUnauthorized();
+        throw new Error("Your session has expired. Please sign in again.");
+      }
       let detail = res.statusText;
       try {
         detail = (await res.json()).detail ?? detail;

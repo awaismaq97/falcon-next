@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pymongo.errors import PyMongoError
 from pydantic import BaseModel, field_validator
 
@@ -26,6 +26,7 @@ import falcon.categories as Categories
 
 logger = logging.getLogger(__name__)
 
+from app.deps import require_identity, require_optional_identity
 router = APIRouter(tags=["categories"])
 
 
@@ -65,7 +66,9 @@ def _handle_db_error(exc: Exception, *, context: str) -> None:
 # ---------------------------------------------------------------------------
 
 @router.get("/identities/{identity_id}/categories")
-def list_categories(identity_id: str) -> dict:
+def list_categories(
+    identity_id: str = Depends(require_identity),
+) -> dict:
     try:
         cats = Categories.list_categories(identity_id)
     except Exception as exc:
@@ -74,7 +77,10 @@ def list_categories(identity_id: str) -> dict:
 
 
 @router.post("/identities/{identity_id}/categories", status_code=201)
-def add_category(identity_id: str, req: AddCategoryRequest) -> dict:
+def add_category(
+    req: AddCategoryRequest,
+    identity_id: str = Depends(require_identity),
+) -> dict:
     try:
         cat = Categories.add_category(identity_id, req.name)
     except Exception as exc:
@@ -83,7 +89,10 @@ def add_category(identity_id: str, req: AddCategoryRequest) -> dict:
 
 
 @router.delete("/identities/{identity_id}/categories/{category_id}")
-def delete_category(identity_id: str, category_id: str) -> dict:
+def delete_category(
+    category_id: str,
+    identity_id: str = Depends(require_identity),
+) -> dict:
     try:
         deleted = Categories.delete_category(category_id, identity_id)
     except Exception as exc:
@@ -99,10 +108,10 @@ def delete_category(identity_id: str, category_id: str) -> dict:
 
 @router.get("/identities/{identity_id}/categories/{category_id}/messages")
 def list_category_messages(
-    identity_id: str,
     category_id: str,
     skip: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
+    identity_id: str = Depends(require_identity),
 ) -> dict:
     try:
         result = Categories.list_category_messages(
@@ -117,7 +126,9 @@ def list_category_messages(
     "/identities/{identity_id}/categories/{category_id}/messages/{message_id}"
 )
 def delete_category_message(
-    identity_id: str, category_id: str, message_id: str
+    category_id: str,
+    message_id: str,
+    identity_id: str = Depends(require_identity),
 ) -> dict:
     try:
         deleted = Categories.delete_category_message(message_id, identity_id)
@@ -133,7 +144,10 @@ def delete_category_message(
 # ---------------------------------------------------------------------------
 
 @router.get("/identities/{identity_id}/categories/{category_id}/export.pdf")
-def export_category_pdf(identity_id: str, category_id: str):
+def export_category_pdf(
+    category_id: str,
+    identity_id: str = Depends(require_identity),
+):
     """Stream all messages in a category as a formatted PDF download."""
     from fastapi.responses import Response
 
