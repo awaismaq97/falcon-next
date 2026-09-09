@@ -636,17 +636,23 @@ def _deliver(job_id: str) -> None:
     try:
         from falcon.watcher import _inject_result
 
+        question = (job.get("question") or "").strip()
         if job["status"] == "done":
             body = (
                 f"Research complete — job `{job_id}`\n"
-                f"**Question:** {job['question']}\n\n{job.get('report', '')}"
+                f"**Question:** {question}\n\n{job.get('report', '')}"
             )
+            # The report itself is a deliverable, not tool plumbing — but the
+            # chat is not where it belongs. One line says it landed; the Research
+            # Reports panel holds the report, the sources and the job record.
+            notice = f"Research complete — {question}" if question else "Research complete."
         else:
             body = (
                 f"Research job `{job_id}` ended with status **{job['status']}**.\n"
-                f"**Question:** {job['question']}\n\n{job.get('error') or 'No further detail.'}"
+                f"**Question:** {question}\n\n{job.get('error') or 'No further detail.'}"
             )
-        _inject_result(job["identity_id"], body)
+            notice = "Research failed."
+        _inject_result(job["identity_id"], body, notice=notice)
     except Exception as exc:  # noqa: BLE001 — delivery must not fail the job
         logger.warning("research: could not deliver job %s: %s", job_id, exc)
 

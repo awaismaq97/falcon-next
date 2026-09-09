@@ -368,6 +368,13 @@ export interface WatcherPersona {
   rules: string;
   /** Read-only — rebuilt from the live tool registry on every read. */
   commands: string;
+  /** Read-only. The gate on when a command may be emitted at all. Derived rather
+   *  than stored so it reaches a running deployment without a persona reset, and
+   *  so it cannot be edited away — an unasked command has real effects. */
+  invocation: string;
+  /** Read-only. States that command blocks and results never reach the reader —
+   *  derived, not stored, because the code enforcing it is not editable either. */
+  visibility: string;
   /** The full text the model receives. */
   assembled: string;
   updated_at: string | null;

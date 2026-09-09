@@ -33,6 +33,7 @@ import time
 from datetime import datetime, timezone
 from typing import Callable
 
+import falcon.agent_redact as Redact
 import falcon.audit as Audit
 import falcon.config as Config
 import falcon.dual_run as DualRun
@@ -253,24 +254,15 @@ def build_assembled_payload(req: ChatSendRequest) -> dict:
         except Exception as exc:  # noqa: BLE001
             logger.warning("chat: watcher persona injection failed for identity=%s: %s", identity_id, exc)
 
-    history = Identity.load_history(identity_id)
-    # Past command blocks are neutralised on the way in. They have already been
-    # executed; leaving them verbatim hands the model a transcript of worked
-    # examples in the exact syntax the persona asks for, and it copies them —
-    # which is what filled conversations with agent output. See
-    # falcon.watcher.defuse_markers.
-    try:
-        from falcon.watcher import defuse_markers
-        messages_for_model = [
-            {
-                "role": m["role"],
-                "content": defuse_markers(m["content"]) if m["role"] == "assistant" else m["content"],
-            }
-            for m in history
-        ]
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("chat: marker defusing failed for identity=%s: %s", identity_id, exc)
-        messages_for_model = [{"role": m["role"], "content": m["content"]} for m in history]
+    # `for_model` gives the model the transcript it needs and nothing more: tool
+    # results in full, and its own past command blocks gone. The blocks have
+    # already executed, so replaying them cannot do anything except invite a
+    # repeat — they are worked examples in the exact syntax the persona asks
+    # for, which is what used to fill conversations with agent output. Removing
+    # them at the source is why nothing needs neutralising here any more; the
+    # command that produced each result is named inside the result itself.
+    history = Identity.load_history(identity_id, for_model=True)
+    messages_for_model = [{"role": m["role"], "content": m["content"]} for m in history]
     # Attached documents are injected into this turn's user message (after memory
     # retrieval, which queries on the typed text only) so the model can read them.
     current_content = _compose_with_documents(req.message, getattr(req, "documents", None))
@@ -437,6 +429,31 @@ def run_send_flow(req: ChatSendRequest, emit: Emit) -> None:
     suppressed = False
     judge_payload = None
 
+    # The reply the reader sees, assembled alongside the full one. `response_text`
+    # stays verbatim — the watcher parses its markers, the audit records it, and
+    # memory extraction reads it — while everything emitted over SSE goes through
+    # the redactor first, so a command block is removed before the token carrying
+    # it can leave the server rather than being cleaned up afterwards in the UI.
+    redactor = Redact.StreamRedactor()
+    visible_text = ""
+
+    def emit_visible(chunk: str) -> None:
+        """Emit a generated chunk after filtering. Holds back partial markers."""
+        nonlocal visible_text
+        shown = redactor.feed(chunk)
+        if shown:
+            visible_text += shown
+            emit({"type": "token", "text": shown})
+
+    def finish_visible() -> str:
+        """Release whatever the redactor was still holding; return the full reply."""
+        nonlocal visible_text
+        tail = redactor.flush()
+        if tail:
+            visible_text += tail
+            emit({"type": "token", "text": tail})
+        return visible_text
+
     stream_gen = Engine.stream_inference(
         model_name=model,
         payload=model_payload,
@@ -467,7 +484,7 @@ def run_send_flow(req: ChatSendRequest, emit: Emit) -> None:
                 else:
                     for tok in agent_stream:
                         response_text += tok
-                        emit({"type": "token", "text": tok})
+                        emit_visible(tok)
                 tools_succeeded = True
             except Exception as tool_exc:  # noqa: BLE001
                 # Model has no tool-calling endpoint → retry this turn as plain
@@ -507,7 +524,7 @@ def run_send_flow(req: ChatSendRequest, emit: Emit) -> None:
             if image_md:
                 response_text += image_md
                 if not use_judge:
-                    emit({"type": "token", "text": image_md})
+                    emit_visible(image_md)
 
             usage = agent_stream.usage
             raw_output = response_text
@@ -527,10 +544,10 @@ def run_send_flow(req: ChatSendRequest, emit: Emit) -> None:
             push("→ OpenRouter API call (streaming)", {"model": model, "messages_count": len(raw_payload)})
             for tok in stream_gen:
                 response_text += tok
-                emit({"type": "token", "text": tok})
+                emit_visible(tok)
             if not response_text or not response_text.strip():
                 response_text = "[no output]"
-                emit({"type": "token", "text": response_text})
+                emit_visible(response_text)
             usage = stream_gen.usage
             raw_output = getattr(stream_gen, "raw_output", response_text)
     except Exception as exc:  # noqa: BLE001
@@ -547,6 +564,28 @@ def run_send_flow(req: ChatSendRequest, emit: Emit) -> None:
 
     api_latency_ms = round((time.monotonic() - api_t0) * 1000)
     push("← generation complete", {"latency_ms": api_latency_ms, "content_preview": response_text[:200]})
+
+    # ── Redaction settles ─────────────────────────────────────────────────
+    # Release anything the redactor held back at the end of the stream. The
+    # buffered paths (judge, and tools under judge) streamed nothing, so their
+    # reply is filtered whole here instead — same function, same result.
+    if use_judge:
+        visible_text = Redact.strip_command_blocks(response_text)
+    else:
+        visible_text = finish_visible()
+
+    # A reply that was nothing but commands leaves the reader an empty bubble.
+    # Falcon's "always output" rule applies to the visible channel too: say that
+    # the work happened, in one line, and let the tool results speak for
+    # themselves. The model's own text is unchanged in `response_text`.
+    if not visible_text.strip() and response_text.strip():
+        visible_text = "Done."
+        if not use_judge:
+            emit({"type": "token", "text": visible_text})
+    push(
+        "← agent redaction",
+        {"visible_chars": len(visible_text), "raw_chars": len(response_text)},
+    )
 
     # ── Judge ─────────────────────────────────────────────────────────────
     if use_judge:
@@ -579,8 +618,11 @@ def run_send_flow(req: ChatSendRequest, emit: Emit) -> None:
             if jr.verdict == "suppress":
                 suppressed = True
                 response_text = "[suppressed]"
-        # Judge mode buffered the answer — reveal the final text now.
-        emit({"type": "message", "text": response_text})
+                visible_text = "[suppressed]"
+        # Judge mode buffered the answer — reveal the final text now. The reveal
+        # is the redacted one; the judge itself read the unredacted reply, which
+        # is what it is meant to be judging.
+        emit({"type": "message", "text": visible_text})
 
     # ── Assistant-language warning (system prompt OFF) ────────────────────
     if not suppressed and not s.use_system_prompt:
@@ -595,9 +637,20 @@ def run_send_flow(req: ChatSendRequest, emit: Emit) -> None:
                 break
 
     # ── Persist assistant message + trace ─────────────────────────────────
+    # Stored as the pair: `content` is the reply as the reader saw it stream,
+    # `raw_content` is the reply as the model wrote it. The watcher reads the
+    # raw field to find its markers, so the commands still run exactly as
+    # emitted — but no reader-facing path reads that field, so the blocks cannot
+    # reappear on reload the way they would if the raw reply were the only copy.
     asst_ts = _utc_iso()
     try:
-        Logger.append_message(identity_id, "assistant", response_text, timestamp=asst_ts)
+        Logger.append_message(
+            identity_id,
+            "assistant",
+            visible_text,
+            timestamp=asst_ts,
+            raw_content=response_text,
+        )
     except Exception as exc:  # noqa: BLE001
         push("ERROR — log assistant response", str(exc), status="error")
 
@@ -619,7 +672,9 @@ def run_send_flow(req: ChatSendRequest, emit: Emit) -> None:
     emit(
         {
             "type": "done",
-            "response_text": response_text,
+            # The reader's copy. `raw_output` stays raw — it feeds the Context
+            # and Audit tabs, which exist precisely to show what really happened.
+            "response_text": visible_text,
             "raw_output": raw_output,
             "usage": usage,
             "latency_ms": api_latency_ms,
@@ -633,9 +688,14 @@ def run_send_flow(req: ChatSendRequest, emit: Emit) -> None:
     )
 
     # ── Background tasks (client already has its answer) ──────────────────
+    # These read the redacted reply, not the raw one. Memory extraction and
+    # categorisation both write records the user reads back in the Memory and
+    # Categories tabs, so handing them command blocks would put the tool layer
+    # back on screen by a longer route. Audit and dual-run are unaffected: they
+    # take `raw_output`, and showing exactly what the model produced is their job.
     final_history = list(history) + [
         {"timestamp": user_ts, "role": "user", "content": logged_user_input},
-        {"timestamp": asst_ts, "role": "assistant", "content": response_text},
+        {"timestamp": asst_ts, "role": "assistant", "content": visible_text},
     ]
     _launch_background_tasks(
         req=req,
@@ -649,7 +709,7 @@ def run_send_flow(req: ChatSendRequest, emit: Emit) -> None:
         raw_output=raw_output,
         usage=usage,
         latency_ms=api_latency_ms,
-        response_text=response_text,
+        response_text=visible_text,
         user_input=user_input,
         final_history=final_history,
         user_ts=user_ts,

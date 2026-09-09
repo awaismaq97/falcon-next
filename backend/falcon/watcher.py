@@ -200,6 +200,10 @@ class ResultBroadcaster(threading.Thread):
         identity_id = doc.get("identity_id")
         if not identity_id:
             return
+        # A result condensed to nothing is tool plumbing the reader is not shown.
+        # It is in the database for the model; there is no bubble to deliver.
+        if not (doc.get("content") or "").strip():
+            return
         _push_to_subscribers(identity_id, {
             "type": "watcher_result",
             "timestamp": doc.get("timestamp", ""),
@@ -295,47 +299,31 @@ def parse_markers(text: str) -> list[dict]:
     return results
 
 
-def format_result(result_text: str) -> str:
-    """Wrap a tool result in the standard [AGENT RESULT] block."""
-    return f"{_RESULT_OPEN}\n{result_text.strip()}\n{_RESULT_CLOSE}"
+def format_result(result_text: str, command: str = "") -> str:
+    """Wrap a tool result in the standard [AGENT RESULT] block.
 
-
-def defuse_markers(text: str) -> str:
-    """Rewrite executed command blocks as a past-tense note.
-
-    Applied to *history* on its way to the model, never to what the model is
-    writing now. The persona teaches the exact block syntax, and the transcript
-    handed back each turn was full of the model's own previous blocks — the
-    strongest possible instruction to emit another one. That is the amplifier
-    behind a conversation filling with agent output: every reply is drafted
-    while looking at a page of worked examples, each of which the watcher then
-    executes for real.
-
-    Replacing them with `(ran: <command>)` keeps what the model needs — that the
-    command happened, and in which turn — while removing the template it was
-    copying. The [AGENT RESULT] blocks are left intact, so the outcomes it has
-    to reason about are still there.
+    The command is named on its own line inside the block. It has to be: the
+    model's own command block is stripped from the history it gets back (see
+    ``falcon.identity._apply_agent_redaction``), so without this a turn that ran
+    several tools would hand back several results with no way to tell which
+    answered what. Inside the delimiters and therefore model-facing only — the
+    reader never sees this block at all.
     """
-    if not text:
-        return text
+    head = f"{_RESULT_OPEN}\n(from: {command.strip()})" if command.strip() else _RESULT_OPEN
+    return f"{head}\n{result_text.strip()}\n{_RESULT_CLOSE}"
 
-    out: list[str] = []
-    pos = 0
-    for m in _OPEN_RE.finditer(text):
-        if m.start() < pos:
-            continue
-        command = m.group(1).strip()
-        close = _CLOSE_RE.search(text, m.end())
-        nxt = _OPEN_RE.search(text, m.end())
-        if close and (nxt is None or close.start() < nxt.start()):
-            end = close.end()
-        else:
-            end = nxt.start() if nxt else len(text)
-        out.append(text[pos:m.start()])
-        out.append(f"(ran: {command})")
-        pos = end
-    out.append(text[pos:])
-    return "".join(out)
+
+# Command blocks used to be rewritten as `(ran: <command>)` on the way into the
+# history, by a `defuse_markers` function that lived here. It existed because the
+# transcript handed back each turn was full of the model's own previous blocks —
+# worked examples in the exact syntax the persona asks for, which it copied,
+# which is what filled conversations with agent output.
+#
+# Nothing defuses them now because nothing has to: a command block never enters
+# the stored message in the first place. `falcon.agent_redact` strips it as the
+# reply streams, so `content` is written already clean and there is no second
+# copy to leak. The command each result came from is named inside the result
+# block by `format_result`, which is the one thing `(ran: ...)` was carrying.
 
 
 # ---------------------------------------------------------------------------
@@ -462,8 +450,27 @@ def _inject_result(
     result_text: str,
     trigger_msg_id: Optional[ObjectId] = None,
     trigger_ts: str = "",
+    command: str = "",
+    notice: Optional[str] = None,
 ) -> None:
     """Insert the watcher result as a distinct assistant message, then push to SSE subscribers.
+
+    The result is written twice, because the model and the reader need different
+    things from it. ``raw_content`` is the full ``[AGENT RESULT]`` block — the
+    tables, ids, latencies and probe output the model has to reason over, and
+    what history hands back next turn. ``content`` is what a person sees, which
+    ``falcon.agent_redact.condense_result`` cuts down to one proof line, one
+    failure sentence, or nothing at all. Only ``content`` leaves the server on
+    any reader-facing path, so the dump has no way to reach the chat.
+
+    A result condensed to nothing is still stored and still delivered to the
+    model; it simply never surfaces. Nothing is pushed to SSE subscribers in
+    that case — there is no message for them to draw.
+
+    ``notice`` overrides the condensation with a caller-supplied single line, for
+    a producer that knows its own one-line summary (research delivering a
+    finished job). It is a substitute for the condensed line, never an escape
+    from the filter: the raw body still goes only to ``raw_content``.
 
     ``_watcher_parent`` records which message carried the command. Insertion
     order alone cannot place the result correctly: a command can take minutes
@@ -472,14 +479,26 @@ def _inject_result(
     belongs to. Recording the parent lets the history be ordered so a result sits
     directly beneath its own command, wherever it finished.
     """
+    from falcon.agent_redact import condense_result
+
     db = get_db()
     ts = _utc_now_iso()
+    raw = format_result(result_text, command)
+    visible = notice if notice is not None else condense_result(command, result_text)
+
     doc = {
         "identity_id": identity_id,
         "timestamp": ts,
         "role": "assistant",
-        "content": format_result(result_text),
+        "content": visible,
+        "raw_content": raw,
         "_watcher": True,
+        # Which tool produced this, recorded as a field rather than left to be
+        # parsed back out of the block. The history read needs it to decide what
+        # the model is given: a read_document result goes to the reader and is
+        # withheld from the payload, and that decision cannot be made from the
+        # body alone. Server-side only — stripped before any client sees the row.
+        "_watcher_command": (command or "").strip(),
     }
     if trigger_msg_id is not None:
         doc["_watcher_parent"] = trigger_msg_id
@@ -488,6 +507,9 @@ def _inject_result(
     if trigger_ts:
         doc["_watcher_parent_ts"] = trigger_ts
     db["messages"].insert_one(doc)
+
+    if not visible:
+        return   # nothing for a reader to see — no push, no empty bubble
 
     # With a broadcaster running, the insert above is itself the delivery signal
     # and every instance fans it out to its own subscribers — pushing here too
@@ -499,7 +521,7 @@ def _inject_result(
     _push_to_subscribers(identity_id, {
         "type": "watcher_result",
         "timestamp": ts,
-        "content": format_result(result_text),
+        "content": visible,
         "parent_ts": trigger_ts,
     })
 
@@ -512,7 +534,11 @@ def _process_message(identity_id: str, msg_doc: dict) -> None:
     """Scan one assistant message, execute any markers, inject results."""
     from falcon.watcher_tools import dispatch, set_current_identity
 
-    content = msg_doc.get("content", "") or ""
+    # Markers are parsed out of the unredacted reply. ``content`` has had every
+    # command block removed before storage so no reader-facing path can show
+    # one, which means it is also the one field guaranteed to contain no marker
+    # — reading it here would leave the watcher with nothing to run.
+    content = msg_doc.get("raw_content") or msg_doc.get("content", "") or ""
     msg_id = msg_doc["_id"]
 
     # Guard: only assistant messages, not watcher result messages themselves
@@ -590,6 +616,7 @@ def _process_message(identity_id: str, msg_doc: dict) -> None:
             identity_id, result,
             trigger_msg_id=msg_id,
             trigger_ts=msg_doc.get("timestamp", ""),
+            command=command,
         )
 
 

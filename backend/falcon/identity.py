@@ -193,7 +193,82 @@ def _place_watcher_results(docs: list[dict]) -> list[dict]:
     return out
 
 
-def load_history(identity_id: str, limit: int = 2000) -> list[dict]:
+def _apply_agent_redaction(docs: list[dict], for_model: bool) -> list[dict]:
+    """Resolve each message to the text its caller is entitled to.
+
+    Three kinds of row, and what each caller gets from them:
+
+    ============= ==================== ==========================
+    row           reader (``False``)   model (``for_model=True``)
+    ============= ==================== ==========================
+    user          verbatim             verbatim
+    assistant     commands stripped    commands stripped
+    tool result   one line, or dropped  the full result
+    ============= ==================== ==========================
+
+    The assistant column is the same on both sides, and deliberately so. A
+    command block in the history is a worked example in exactly the syntax the
+    persona asks the model to produce, so handing its own past blocks back is
+    the strongest possible instruction to write another — which is what used to
+    fill conversations with agent output. They have already run; replaying them
+    can only cause a repeat. Nothing is lost by dropping them, because the
+    result that follows records what happened and names the command that did it.
+
+    Tool results are the one place the two columns diverge. The model has to
+    reason over what came back — replies it fetched, a write it needs to confirm
+    — so it gets the result whole. The reader gets what
+    ``falcon.agent_redact.condense_result`` already reduced it to, and a result
+    that reduced to nothing is dropped rather than rendered as a blank turn.
+
+    The exception runs the other way. A reader-facing command — ``read_document``
+    — produces something the person asked to look at and the model has no use
+    for, and which can be far larger than the context window, so the reader gets
+    it in full and the model gets a note saying it was delivered. See
+    ``falcon.agent_redact.READER_FACING_COMMANDS``.
+
+    The reader's side is filtered again here rather than trusted from storage.
+    That is not redundant: rows written before this existed still hold raw
+    blocks, and filtering on read means they come out clean with no backfill.
+    """
+    from falcon.agent_redact import (
+        condense_result,
+        model_result_view,
+        strip_command_blocks,
+    )
+
+    out: list[dict] = []
+    for d in docs:
+        raw = d.pop("raw_content", None)
+        command = d.pop("_watcher_command", "") or ""
+        content = d.get("content", "") or ""
+        is_result = bool(d.get("_watcher"))
+
+        if is_result:
+            if for_model:
+                # `raw` is absent on a row written before the split, where
+                # `content` is itself the unredacted result block.
+                d["content"] = model_result_view(command, raw or content)
+                out.append(d)
+                continue
+            # Reader. A legacy row still holds the raw block, so condense it on
+            # the way past; the command that produced it was not recorded on the
+            # message, so a failure gets the generic sentence, while a proof line
+            # still resolves because that is read out of the result itself.
+            d["content"] = content if raw is not None else condense_result("", content)
+            if not d["content"]:
+                continue
+        else:
+            d["content"] = strip_command_blocks(content)
+
+        out.append(d)
+    return out
+
+
+def load_history(
+    identity_id: str,
+    limit: int = 2000,
+    for_model: bool = False,
+) -> list[dict]:
     """Return the message history for identity_id in chronological order.
 
     Behaviour:
@@ -216,6 +291,12 @@ def load_history(identity_id: str, limit: int = 2000) -> list[dict]:
     Args:
         identity_id: The identity whose history to load.
         limit: Maximum number of (most recent) messages to return (default 2000).
+        for_model: Build the transcript for inference rather than for a reader.
+            Either way the assistant's own command blocks are gone — they have
+            already run, and replaying them only teaches the model to write more.
+            The difference is tool results: the model gets them in full, a reader
+            gets the one line they were condensed to, or nothing. False is the
+            default and what every reader-facing caller must use.
 
     Returns:
         A list of {timestamp, role, content} dicts in chronological order.
@@ -246,7 +327,7 @@ def load_history(identity_id: str, limit: int = 2000) -> list[dict]:
             )
             docs = list(cursor)
             docs.reverse()   # back to chronological order for the caller
-            return _place_watcher_results(docs)
+            return _apply_agent_redaction(_place_watcher_results(docs), for_model)
         except _TRANSIENT_DB_ERRORS as exc:
             last_exc = exc
             if attempt < 2:

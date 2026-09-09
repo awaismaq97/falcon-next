@@ -1275,9 +1275,14 @@ def _read_document(payload: str) -> str:
 
     The default answer is the file itself — a download link and its metadata —
     because someone who uploaded a PDF and asks for it back wants the PDF, not
-    the text scraped out of it. Add ``full`` to get the entire extracted text,
-    which is what to do when the contents actually need to be read or analysed
-    rather than handed over.
+    the text scraped out of it. Add ``full`` to get the entire extracted text.
+
+    This result is written for a person to read. Unlike every other tool here it
+    is shown in the chat and withheld from the model
+    (``falcon.agent_redact.READER_FACING_COMMANDS``), because a document can be
+    larger than the context window — so there is no point steering the model
+    with prose it will never see, and any such line would be read by the user as
+    instructions aimed at somebody else.
     """
     from falcon import documents_store as Store
 
@@ -1314,18 +1319,8 @@ def _read_document(payload: str) -> str:
         pretty = f"{size / 1024:,.0f} KB" if size < 1024 * 1024 else f"{size / 1048576:.1f} MB"
         lines.append(f"- **File:** {doc.get('content_type') or 'file'}, {pretty}")
         lines.append(f"- **Download:** [{_md(name)}]({_download_url(storage_id, identity)})")
-        lines += [
-            "",
-            "Give the user that download link exactly as written — it is a markdown link and "
-            "the chat renders it as a working download of the original file.",
-        ]
     else:
         lines.append(f"- **File:** none — stored as text only ({doc.get('chars', 0):,} chars)")
-        lines += [
-            "",
-            "There is no original file for this entry, so there is nothing to download. "
-            "Say so rather than offering a link.",
-        ]
 
     if doc.get("truncated"):
         lines += [
@@ -1349,9 +1344,6 @@ def _read_document(payload: str) -> str:
             f"**Full text** — {doc.get('chars', 0):,} characters, extracted from the file",
             "",
             _fence(text),
-            "",
-            "This was requested in full for analysis. Do not print it back to the user — "
-            "answer from it, quote only what matters, and give them the download link above.",
         ]
         return "\n".join(lines)
 
@@ -1365,10 +1357,8 @@ def _read_document(payload: str) -> str:
     if len(text) > len(preview):
         lines += [
             "",
-            "That is the start of the file, not the file. The download link above is what the "
-            "user wants when they ask for this document. Only if you need to analyse, search "
-            f"or quote the contents, run read_document again as `{storage_id} full` — and even "
-            "then, never reproduce the whole text in your reply.",
+            "That is the opening of the file, not the whole of it. Download it above for the "
+            "original, or ask for the full extracted text if you want the rest here.",
         ]
     return "\n".join(lines)
 

@@ -62,14 +62,27 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def append_message(identity_id: str, role: str, content: str, timestamp: str = "") -> None:
+def append_message(
+    identity_id: str,
+    role: str,
+    content: str,
+    timestamp: str = "",
+    raw_content: str = "",
+) -> None:
     """Append one message entry to the MongoDB 'messages' collection.
 
     Args:
         identity_id: Scoping key for the conversation.
         role: Must be "user" or "assistant".
-        content: Message text (may be an empty string).
+        content: Message text as the reader sees it (may be an empty string).
         timestamp: Optional ISO 8601 timestamp. If omitted, current UTC time is used.
+        raw_content: The unredacted text, when it differs from ``content``.
+            An assistant reply carrying ``[AGENT: ...]`` commands is stored twice:
+            ``content`` with the command blocks removed, because that field is
+            what every reader-facing path renders, and ``raw_content`` verbatim,
+            because the watcher parses markers out of it and the model is given
+            it back as history. Omitted when the two are identical, so ordinary
+            messages keep their existing shape.
 
     Raises:
         ValueError: If identity_id contains forbidden characters.
@@ -82,13 +95,17 @@ def append_message(identity_id: str, role: str, content: str, timestamp: str = "
             f"role must be 'user' or 'assistant', got: {role!r}"
         )
 
-    db = get_db()
-    db["messages"].insert_one({
+    doc = {
         "identity_id": identity_id,
         "timestamp":   timestamp if timestamp else _utc_now_iso(),
         "role":        role,
         "content":     content,
-    })
+    }
+    if raw_content and raw_content != content:
+        doc["raw_content"] = raw_content
+
+    db = get_db()
+    db["messages"].insert_one(doc)
 
     enforce_retention(identity_id, keep_turns=CONVERSATION_RETENTION_TURNS)
 

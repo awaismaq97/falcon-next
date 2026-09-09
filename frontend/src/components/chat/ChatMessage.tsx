@@ -54,6 +54,32 @@ function SpeakButton({ id, text }: { id: string; text: string }) {
 // here is what turns the raw agent output into an approval card.
 export const TWEET_CONFIRM_RE = /\[\[TWEET_CONFIRM:([0-9a-f]{4,8})\]\]/i;
 
+// Belt and braces over the server-side filter in falcon/agent_redact.py, which
+// is the thing that actually guarantees these never arrive. This catches the one
+// case the server cannot: a message already sitting in a client cache from
+// before the filter existed. Never rely on it — a client-side strip is a
+// rendering convenience, not a boundary.
+const AGENT_BLOCK_RE =
+  /\[(?:AGENT|ACTION)\s*:\s*[^\]]+\][\s\S]*?(?:\[\/(?:AGENT|ACTION)\]|$)/gi;
+const AGENT_RESULT_DELIM_RE = /\[\/?AGENT RESULT\]/gi;
+
+function stripAgentBlocks(text: string): string {
+  return text
+    .replace(AGENT_BLOCK_RE, "")
+    .replace(AGENT_RESULT_DELIM_RE, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+// Tool results get the delimiters removed and nothing else. A read_document
+// result is a real document, and a document is allowed to contain the string
+// "[AGENT: ...]" — rewriting one to be safe would corrupt the very thing the
+// user asked to see. The server already decided what this field may contain,
+// which is why the client does not need to second-guess the body.
+function stripResultDelimiters(text: string): string {
+  return text.replace(AGENT_RESULT_DELIM_RE, "").trim();
+}
+
 /** Post / Reject card for a tweet the agent has proposed.
  *
  * Status comes from the server rather than the chat message, so a tweet that was
@@ -355,38 +381,77 @@ export const ChatMessage = memo(function ChatMessage({
     );
   }
 
-  // ── Watcher result — visually distinct block ───────────────────────────
+  // ── Watcher result ─────────────────────────────────────────────────────
+  // The server has already reduced this to what a reader is shown: a proof
+  // line, a failure sentence, a staged tweet, or — for read_document alone — a
+  // whole document, which is delivered here instead of into the model's payload
+  // because it can be larger than the context window. A result with nothing to
+  // show never reaches the client at all, so an empty body here means a stale
+  // cache and renders as nothing rather than as an empty card.
   if (isWatcher) {
-    // Strip the [AGENT RESULT] / [/AGENT RESULT] delimiters for clean display;
-    // they're already conveyed by the surrounding UI chrome.
-    const inner = message.content
-      .replace(/^\[AGENT RESULT\]\s*/i, "")
-      .replace(/\s*\[\/AGENT RESULT\]$/i, "")
-      .trim();
+    const inner = stripResultDelimiters(message.content);
+    if (!inner) return null;
 
-    // A staged tweet renders as an approval card instead of raw text. The
-    // marker is stripped either way so it never reaches the reader.
+    // A staged tweet renders as an approval card. The marker is stripped either
+    // way so it never reaches the reader.
     const staged = inner.match(TWEET_CONFIRM_RE);
     const body = staged ? inner.replace(TWEET_CONFIRM_RE, "").trim() : inner;
 
+    if (staged) {
+      return (
+        <div data-msg-ts={message.timestamp || undefined} className="px-4 py-1.5">
+          <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">
+            <div className="flex items-center gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5">
+              <span className="text-[0.7rem] font-semibold uppercase tracking-wider text-[var(--color-fg-subtle)]">
+                Tweet — your approval needed
+              </span>
+              <CopyButton text={body} />
+            </div>
+            <div className="px-3 py-2.5">
+              {identityId ? (
+                <TweetConfirmCard identityId={identityId} code={staged[1].toLowerCase()} />
+              ) : (
+                <Markdown>{body}</Markdown>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // A delivered document. The server only ever sends one line for a receipt —
+    // a proof line or a failure sentence — so anything multi-line is content the
+    // user is meant to read, and it gets the card, a scroll bound, and real
+    // markdown so the download link works.
+    if (inner.includes("\n")) {
+      return (
+        <div data-msg-ts={message.timestamp || undefined} className="px-4 py-1.5">
+          <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">
+            <div className="flex items-center gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5">
+              <span className="text-[0.7rem] font-semibold uppercase tracking-wider text-[var(--color-fg-subtle)]">
+                📄 Document
+              </span>
+              <CopyButton text={inner} />
+            </div>
+            {/* A full document can be very long — bounded here so one of them
+                cannot bury the rest of the conversation. */}
+            <div className="max-h-[32rem] overflow-y-auto px-3 py-2.5">
+              <Markdown>{inner}</Markdown>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // One line. A bordered card with a header would be more chrome than the
+    // line it wraps, and the point of the filter is that there is nothing here
+    // worth framing — just the receipt.
     return (
-      <div data-msg-ts={message.timestamp || undefined} className="px-4 py-1.5">
-        <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">
-          {/* Header bar */}
-          <div className="flex items-center gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5">
-            <span className="text-[0.7rem] font-semibold uppercase tracking-wider text-[var(--color-fg-subtle)]">
-              {staged ? "Tweet — your approval needed" : "⚙ Agent Result"}
-            </span>
-            <CopyButton text={body} />
-          </div>
-          {/* Body */}
-          <div className="px-3 py-2.5">
-            {staged && identityId ? (
-              <TweetConfirmCard identityId={identityId} code={staged[1].toLowerCase()} />
-            ) : (
-              <Markdown>{body || "[no output]"}</Markdown>
-            )}
-          </div>
+      <div data-msg-ts={message.timestamp || undefined} className="px-4 py-1">
+        <div className="flex items-start gap-2 pl-9 text-[0.78rem] text-[var(--color-fg-muted)]">
+          <span className="select-none text-[var(--color-fg-subtle)]">⚙</span>
+          <span className="min-w-0 flex-1 break-words font-mono">{inner}</span>
+          <CopyButton text={inner} />
         </div>
       </div>
     );
@@ -408,7 +473,9 @@ export const ChatMessage = memo(function ChatMessage({
           {message._suppressed ? (
             <div className="italic text-[var(--color-fg-subtle)]">[suppressed]</div>
           ) : (
-            <Markdown>{message.content || (message._streaming ? "" : "[no output]")}</Markdown>
+            <Markdown>
+              {stripAgentBlocks(message.content) || (message._streaming ? "" : "[no output]")}
+            </Markdown>
           )}
           {message._streaming && !message.content && (
             <span className="streaming-caret text-[var(--color-fg-subtle)]" />
