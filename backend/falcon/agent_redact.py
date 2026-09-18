@@ -27,6 +27,9 @@ The contract, in full:
 * every ``[AGENT: ...]...[/AGENT]`` block is removed from the reply
 * a write that verified gets **one line** — ``Proof: <title> - id: <doc_...>``
 * a failure gets **one plain sentence** — ``Storage failed.``
+* a result that *is* the answer the user asked for, and is small by construction
+  — a folder listing, a document's bullets — is shown as returned
+  (``SHARED_RESULT_COMMANDS``)
 * everything else from the tool layer is silent
 
 Two entry points, deliberately sharing one implementation so a live stream and a
@@ -253,6 +256,37 @@ def is_reader_facing(command: str) -> bool:
     """True if this command's result is shown to the user and withheld from the model."""
     return (command or "").strip().lower() in READER_FACING_COMMANDS
 
+
+# ---------------------------------------------------------------------------
+# Commands whose result belongs to the reader AND to the model
+# ---------------------------------------------------------------------------
+# The third category, and the reason there had to be one. Two already existed:
+# a result goes to the model and stays off screen (nearly everything), or it goes
+# to the reader and is withheld from the model (read_document). The Drive tools
+# fit neither.
+#
+# What they return is an answer, not plumbing — a folder's contents, a document's
+# key points — so silencing it would mean the user asked what is in the folder
+# and watched the assistant paraphrase a table it could see and they could not.
+# And it is small and bounded by construction: a list of filenames, or a dozen
+# bullets. That is the whole test for membership here. read_document is not in
+# this set precisely because its payload has no bound.
+#
+# Note what is NOT made safe by this: `drive_summarize <id> full` returns a
+# document's text, and it goes on screen because the user asked for the text in
+# so many words. The bound on that path is the tool's own character cap and the
+# persona rule telling the model not to reach for `full` unasked — not this set.
+SHARED_RESULT_COMMANDS = frozenset({
+    "drive_list",
+    "drive_summarize",
+    "drive_upload",
+})
+
+
+def is_shared_result(command: str) -> bool:
+    """True if this command's result is shown to the user and also given to the model."""
+    return (command or "").strip().lower() in SHARED_RESULT_COMMANDS
+
 # How a tool says it failed.
 _FAILURE_PREFIXES = ("[ERROR]", "[NOT CONFIGURED]")
 _FAILURE_MARKERS = ("NOT STORED", "NOT DELETED")
@@ -273,6 +307,9 @@ _FAILURE_SENTENCES = {
     "research": "Research failed.",
     "http_get": "The request failed.",
     "spawn_agent": "Could not create that agent.",
+    "drive_list": "Could not read the Drive folder.",
+    "drive_summarize": "Could not read that document from Drive.",
+    "drive_upload": "Upload to Drive failed — nothing was uploaded.",
 }
 _GENERIC_FAILURE = "That action failed."
 
@@ -317,6 +354,11 @@ def condense_result(command: str, result_text: str) -> str:
     # A document the user asked to see. It is the one result shown in full —
     # they requested it, and it is going to them instead of into the payload.
     if is_reader_facing(command):
+        return text
+
+    # An answer the user asked for, small enough to read in the chat, which the
+    # model also needs in order to discuss it. Shown as returned.
+    if is_shared_result(command):
         return text
 
     # A verified write is the one success worth a line, because the user has no

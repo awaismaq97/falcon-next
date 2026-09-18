@@ -175,6 +175,57 @@ frontend/                         — Next.js 15 SPA (App Router, TS, Tailwind v
 
 The backend streams chat over **Server-Sent Events** (`POST /api/chat/send`); the blocking OpenAI/LangGraph generators run in a worker thread and are pumped to the event loop, so the loop never blocks. The backend is **stateless** — the frontend owns all settings and sends them per request. See [`DEPLOYMENT.md`](DEPLOYMENT.md) for the full architecture diagram.
 
+## Google Drive
+
+Three watcher agents work inside one Drive folder: `drive_list` (what is in it),
+`drive_summarize` (a document's key points) and `drive_upload` (put a stored
+document into it).
+
+A document's text never enters the chat. `drive_summarize` returns bullets, and
+the full text comes out only through `read_document`, or through an explicit
+`full` on a document the user has asked to see. That rule lives in the watcher
+persona as a derived block, so it cannot be edited away and reaches an existing
+deployment without a persona reset.
+
+### Connecting
+
+Connect once, from **Admin Panel → Drive**. The refresh token is stored encrypted
+in MongoDB, so it survives redeploys and is shared by every instance; access
+tokens are minted from it on demand. Lumen Guard refreshes through it on its
+normal cycle, which also keeps it from lapsing.
+
+Two things outside this repo decide whether that holds:
+
+* **Publish the OAuth client** in the Cloud Console. A client left in *Testing*
+  issues refresh tokens that expire after seven days, which is the usual cause of
+  "it asks me to connect again".
+* **Register the redirect URI** exactly as `GOOGLE_OAUTH_REDIRECT_URI` is set.
+
+### Scopes
+
+The default grant is `drive.readonly` + `drive.file`: read across the account,
+and write only to files the app itself created. Nothing that already existed in
+the Drive can be modified or deleted. Google has no folder-scoped permission, so
+the folder boundary is enforced in `falcon/google_drive.py` — every listing and
+read resolves against `GOOGLE_DRIVE_FOLDER_ID` or a folder proven to be inside
+it. No sharing permission is ever set, so uploads stay as private as the folder.
+
+Narrow to `drive.file` alone via `GOOGLE_DRIVE_SCOPES` if the agents only need to
+see documents they uploaded themselves.
+
+### Environment
+
+| Variable | Purpose |
+|---|---|
+| `GOOGLE_OAUTH_CLIENT_JSON` | Contents of the client secrets JSON downloaded from the Cloud Console. Preferred — an env var survives a container rebuild, a file does not. |
+| `GOOGLE_OAUTH_CLIENT_SECRETS_FILE` | Path to that same JSON, for local development. |
+| `GOOGLE_OAUTH_REDIRECT_URI` | e.g. `https://<host>/api/drive/callback`. Must match the Cloud Console exactly. |
+| `GOOGLE_DRIVE_FOLDER_ID` | The folder id from `drive.google.com/drive/folders/<id>`. |
+| `GOOGLE_DRIVE_SCOPES` | Optional override, space separated. |
+| `DRIVE_SUMMARY_MODEL` | Optional. Default `openai/gpt-4o-mini`. |
+
+---
+
 ### MongoDB Collections
 
 | Collection | Contents |
@@ -187,6 +238,8 @@ The backend streams chat over **Server-Sent Events** (`POST /api/chat/send`); th
 | `audit_log` | Full inference audit records — 13 fields per turn |
 | `conversation_summaries` | `{identity_id, summary, turn_count, updated_at}` — one doc per identity |
 | `dual_run_log` | Side-by-side dual-run records with breakthrough detection |
+| `google_drive_auth` | One doc: the encrypted Drive refresh token, the account it belongs to, and when it last refreshed |
+| `google_oauth_state` | Short-lived CSRF state for an authorisation in flight; TTL-indexed to ten minutes |
 
 ---
 

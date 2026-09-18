@@ -80,6 +80,33 @@ services:
       # back to the four values above when this is unset.
       - key: TWITTER_BEARER_TOKEN
         scope: RUN_TIME
+      # Google Drive, for the drive_list / drive_summarize / drive_upload agents.
+      # The client secrets JSON, on one line, from a **Web application** OAuth
+      # client — a Desktop client cannot redirect to an https callback. Set in
+      # the Dashboard alongside the other secrets.
+      - key: GOOGLE_OAUTH_CLIENT_JSON
+        scope: RUN_TIME
+      # Must match a redirect URI registered on that client character for
+      # character. Not a secret — it is a public URL, and Google refuses any
+      # value that is not on the client's registered list, so naming it here
+      # grants nothing. Registered alongside the localhost equivalent used in
+      # development, so one client serves both.
+      - key: GOOGLE_OAUTH_REDIRECT_URI
+        scope: RUN_TIME
+        value: "https://falcon-huslj.ondigitalocean.app/api/drive/callback"
+      # The one folder the agents can reach. Not a secret — a folder id is not a
+      # capability, since reaching it still needs the connected credential.
+      - key: GOOGLE_DRIVE_FOLDER_ID
+        scope: RUN_TIME
+        value: "1inIQps5OKfOT5ijiU7FrpMIS0_UoXZCr"
+      # Read across the account, write only to files this app created, so nothing
+      # that already existed in the Drive can be modified or deleted.
+      - key: GOOGLE_DRIVE_SCOPES
+        scope: RUN_TIME
+        value: "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file"
+      - key: DRIVE_SUMMARY_MODEL
+        scope: RUN_TIME
+        value: "openai/gpt-4o-mini"
       - key: CORS_ORIGINS
         scope: RUN_TIME
         value: "*"

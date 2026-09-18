@@ -92,7 +92,7 @@ DEFAULT_RULES = (
 # ---------------------------------------------------------------------------
 # Derived, non-editable blocks
 # ---------------------------------------------------------------------------
-# Neither of the two blocks below is in DEFAULT_RULES, and that is deliberate on
+# None of the three blocks below is in DEFAULT_RULES, and that is deliberate on
 # two counts.
 #
 # The rules half is authored and stored in Mongo, so a change to the defaults
@@ -101,10 +101,11 @@ DEFAULT_RULES = (
 # rebuilt on every read, exactly like AVAILABLE COMMANDS, so it cannot go stale,
 # cannot be missing, and lands on a running deployment without a persona reset.
 #
-# And neither is the user's to edit. falcon.agent_redact removes the blocks
-# unconditionally, and a command that fires unasked has real effects on the
-# user's account — an editable persona that could be talked out of either is not
-# a safeguard.
+# And none of them is the user's to edit. falcon.agent_redact removes the blocks
+# unconditionally, a command that fires unasked has real effects on the user's
+# account, and a document pasted into the chat cannot be taken back out of it —
+# an editable persona that could be talked out of any of the three is not a
+# safeguard.
 
 # What the reader sees of the tool layer.
 VISIBILITY_CONTRACT = (
@@ -182,6 +183,48 @@ INVOCATION_GATE = (
     "posts, deletes or spends something that cannot be undone."
 )
 
+
+# What may and may not be written into a reply out of a document.
+#
+# Derived, for the same two reasons as the blocks above: it has to reach a
+# database that was seeded before it existed, and it is not the user's to edit.
+#
+# The rule it carries is a hard one. A document here can be a manuscript — longer
+# than the model's whole context, and far longer than anything a person wants to
+# scroll past in a chat. A model that has just summarised one holds its text, and
+# the natural next move when asked a follow-up is to quote generously, then to
+# paste a section, then to reproduce the thing. Each step looks helpful. The
+# result is a conversation nobody can read and a context window spent on text
+# that was already on disk.
+#
+# So the text has exactly two ways out — `drive_summarize … full`, and
+# read_document — and both require the user to have asked for the document
+# itself. Everything else is bullets.
+DOCUMENT_HANDLING = (
+    "DOCUMENTS — WHAT GOES IN THE CHAT:\n"
+    "Never reproduce a document's text in your reply. Not the whole document, not "
+    "a section of it, not 'the relevant part' — a document can be longer than "
+    "this entire conversation, and putting one in the chat buries everything else "
+    "in it.\n"
+    "- What you report is the summary: the ideas, the plot points, the decisions "
+    "and figures. That is what drive_summarize returns and it is the answer, not "
+    "a preview of one. Do not apologise for it or offer the full text as a better "
+    "version.\n"
+    "- A short quotation — a line, a sentence — is fine when the user asked about "
+    "that specific passage and it is the thing being discussed. A paragraph is "
+    "not, and several quotations adding up to the document is the thing this rule "
+    "exists to stop.\n"
+    "- If you need more of a document than the bullets gave you, run "
+    "drive_summarize again with a focus line naming what you are after. Do not "
+    "reach for the full text to satisfy your own curiosity.\n"
+    "- Only when the user asks for the document itself — to see it, read it, or "
+    "have it — does the full text come out, and then it goes through "
+    "read_document, which hands it to them properly. Asking a question about a "
+    "document is not asking for the document.\n"
+    "- When you are unsure whether they wanted the summary or the whole thing, "
+    "give the summary and ask. That way round costs a sentence; the other way "
+    "costs them the conversation."
+)
 
 # Hand-written descriptions for built-in tools. A tool absent from this map —
 # anything spawned at runtime — is described from its spawn prompt instead.
@@ -278,6 +321,11 @@ BUILTIN_DESCRIPTIONS: dict[str, dict] = {
         "use_when": (
             "the user wants a stored document back — to see it, or to download it. Get the "
             "id from list_documents first.\n"
+            "Storage ids only — the doc_a1b2c3d4e5f6 form. A Google Drive file id is a "
+            "different thing from a different store, and this command cannot open one. "
+            "If the id came from drive_list, the command you want is drive_summarize, "
+            "whatever verb the user used: 'read this', 'open that', 'what's in it' all "
+            "mean drive_summarize when the id is a Drive id.\n"
             "This one delivers to them, not to you. The document goes into the chat and you "
             "receive only a note that it was sent, with its title and id, because a document "
             "can be larger than your whole context. So do not run it to look something up "
@@ -319,6 +367,70 @@ BUILTIN_DESCRIPTIONS: dict[str, dict] = {
         "use_when": "you need to create a new tool/agent that doesn't exist yet.",
         "payload": "free-text description of the capability you need.",
         "example": "Create a tool that sends an email via SMTP.",
+    },
+    "drive_list": {
+        "use_when": (
+            "the user asks what is in the Google Drive folder, or you need a file id "
+            "before you can read something. It returns an index — names, file ids, "
+            "types and dates — not any document's contents.\n"
+            "The ids it returns are what drive_summarize takes. Getting one from here "
+            "is the only correct way to name a Drive document: never invent a file id, "
+            "and never assume a document exists because it would make sense if it did."
+        ),
+        "payload": (
+            "empty to list the whole folder, a search term to narrow it, or a subfolder "
+            "id to look inside one."
+        ),
+        "example": "chapter",
+    },
+    "drive_summarize": {
+        "use_when": (
+            "the user wants to know what a document says — what is in it, what it "
+            "argues, what happens in it. It reads the document and returns its key "
+            "points as bullets.\n"
+            "This is the command for any Drive file id, whatever the user called for. "
+            "'read it', 'open it', 'summarise it', 'what does it say' — all of them are "
+            "this one when the id came from drive_list. read_document is a different "
+            "store and will refuse a Drive id.\n"
+            "It does not return the document. That is the point of it: these files run "
+            "to hundreds of pages, and the bullets are what can actually be read in a "
+            "conversation. Report the bullets; do not ask for the text as well because "
+            "you would like to check something.\n"
+            "Get the file id from drive_list first. It also accepts a doc_ storage id, "
+            "or the document's name — a name that matches several documents comes back "
+            "as a list, and the right response to that is to ask which one, not to pick.\n"
+            "Adding 'full' returns the document's text instead of a summary. Only do "
+            "that when the user has asked for the document itself in so many words. "
+            "Wanting to be thorough is not that, and neither is needing a detail — for "
+            "a detail, ask drive_summarize again with a focus line saying what you are "
+            "looking for.\n"
+            "Every result names a storage id. If the user wants the document delivered "
+            "to them, run read_document with that id rather than reaching for 'full'."
+        ),
+        "payload": (
+            "the file id, storage id or name on the first line; anything on the lines "
+            "after it narrows what the summary should attend to."
+        ),
+        "example": "1aBcD3fGhIjKlMnOpQrStUvWxYz0123456",
+    },
+    "drive_upload": {
+        "use_when": (
+            "the user asks to upload, save or put a document on Drive — 'upload it', "
+            "'save this to drive', 'put that in the folder'. It copies a document that "
+            "is already stored here into the Drive folder.\n"
+            "Only documents already in the library can be uploaded: something the user "
+            "attached to a message, or something saved with library_store. If they want "
+            "to upload something they have not sent you, ask them to attach it first.\n"
+            "It always creates a new file and never replaces one, so nothing already in "
+            "Drive can be overwritten by it. The upload is private — it inherits the "
+            "folder's access and no sharing link is made, so do not offer to share it "
+            "or describe it as a link anyone can open.\n"
+            "Run it when they ask for it and not otherwise. Do not upload a document "
+            "because it seems worth keeping, because they just sent it, or to tidy "
+            "anything up."
+        ),
+        "payload": "the doc_ storage id of the document to upload, or its name.",
+        "example": "doc_a1b2c3d4e5f6",
     },
     "research": {
         "use_when": (
@@ -455,7 +567,8 @@ def assemble() -> str:
         f"AVAILABLE COMMANDS (reference — this is what exists, not what to do):"
         f"\n\n{render_commands()}\n\n"
         f"{INVOCATION_GATE}\n\n"
-        f"{VISIBILITY_CONTRACT}"
+        f"{VISIBILITY_CONTRACT}\n\n"
+        f"{DOCUMENT_HANDLING}"
     )
     if rules:
         text += f"\n\nRULES:\n{rules}"
@@ -472,6 +585,7 @@ def describe() -> dict[str, Any]:
         "commands": commands,
         "invocation": INVOCATION_GATE,
         "visibility": VISIBILITY_CONTRACT,
+        "documents": DOCUMENT_HANDLING,
         "assembled": assemble(),
         "updated_at": parts.get("updated_at"),
         "updated_by": parts.get("updated_by", ""),

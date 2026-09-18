@@ -375,6 +375,11 @@ export interface WatcherPersona {
   /** Read-only. States that command blocks and results never reach the reader —
    *  derived, not stored, because the code enforcing it is not editable either. */
   visibility: string;
+  /** Read-only. The rule that a document's text never goes into the chat unless
+   *  the user asked for the document itself. Derived for the same reasons: it has
+   *  to reach a persona seeded before it existed, and a document pasted into the
+   *  conversation cannot be taken back out. */
+  documents: string;
   /** The full text the model receives. */
   assembled: string;
   updated_at: string | null;

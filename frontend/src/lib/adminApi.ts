@@ -173,3 +173,51 @@ export const lumenApi = {
   start: () => adminReq<LumenState>("/api/admin/lumen/start", { method: "POST" }),
   stop: () => adminReq<LumenState>("/api/admin/lumen/stop", { method: "POST" }),
 };
+
+// ---------------------------------------------------------------------------
+// Google Drive — one connection for the whole deployment
+// ---------------------------------------------------------------------------
+// Connecting is a browser round trip through Google's consent screen, so the
+// client's job is only to get the URL and open it. The callback lands on the
+// backend, not here: it has to be a page Google can redirect to, and it carries
+// no token, so a fetch could not complete the flow even if it wanted to.
+
+export interface DriveStatus {
+  configured: boolean;
+  /** Everything missing from the environment, each phrased as its own fix. */
+  problems: string[];
+  connected: boolean;
+  account_email: string;
+  connected_at: string | null;
+  connected_by: string;
+  granted_scopes: string;
+  last_refresh_at: string | null;
+  last_error: string;
+  folder_id: string;
+  folder_name: string;
+  redirect_uri: string;
+  scopes: string;
+  summary_model: string;
+  /** The configured folder changed after connecting — the grant may not cover it. */
+  folder_changed_since_connect: boolean;
+}
+
+export const driveApi = {
+  status: () => adminReq<DriveStatus>("/api/drive/status"),
+  connect: () =>
+    adminReq<{ auth_url: string; redirect_uri: string; scopes: string; message: string }>(
+      "/api/drive/connect",
+      { method: "POST" },
+    ),
+  disconnect: () =>
+    adminReq<DriveStatus & { disconnected: boolean }>("/api/drive/disconnect", {
+      method: "POST",
+    }),
+  // Forces a real token refresh and folder read, so the button tests something
+  // rather than reporting what was already on file. Slower than the others.
+  check: () =>
+    adminReq<DriveStatus & { ok: boolean; folder_name: string }>("/api/drive/check", {
+      method: "POST",
+      signal: AbortSignal.timeout(45_000),
+    }),
+};

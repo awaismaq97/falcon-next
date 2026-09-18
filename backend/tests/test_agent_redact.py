@@ -414,3 +414,100 @@ def test_a_failed_read_is_still_one_sentence():
     """Reader-facing does not mean an error page is shown to the reader."""
     out = condense_result("read_document", "[ERROR] No stored document with id 'doc_x'.")
     assert out == "Could not read that document."
+
+
+# ---------------------------------------------------------------------------
+# The Drive family — results that go to the reader AND to the model
+# ---------------------------------------------------------------------------
+# The third category, and the one that needs a test most, because its two
+# neighbours each fail differently if it is wrong. Silenced, the user asks what
+# is in the folder and watches the assistant paraphrase a table it can see and
+# they cannot. Treated as reader-facing, the model is handed a note saying it has
+# not read the summary it is being asked about.
+
+from falcon.agent_redact import is_shared_result  # noqa: E402
+
+FOLDER_LISTING = (
+    "**2 documents in Drafts**\n\n"
+    "| Document | File ID | Type | Size | Modified |\n"
+    "| --- | --- | --- | --- | --- |\n"
+    "| Chapter Three | `1aBcD3fGhIjKlMnOpQrStUvWxYz0123456` | Google Doc | — | 2026-09-01 |\n"
+    "| Outline.pdf | `1zYxW9vUtSrQpOnMlKjIhGfEdCbA9876543` | PDF | 84 KB | 2026-08-28 |"
+)
+
+SUMMARY = (
+    "### Chapter Three — The Descent\n\n"
+    "_Google Drive · Google Doc · 48,210 characters_\n\n"
+    "- Mara refuses the lift and takes the service stair instead.\n"
+    "- The building's power fails on the eleventh floor.\n\n"
+    "Stored as `doc_a1b2c3d4e5f6`."
+)
+
+
+def summary_turn():
+    return [
+        {"role": "user", "content": "what happens in chapter three?"},
+        {
+            "role": "assistant",
+            "_watcher": True,
+            "content": condense_result("drive_summarize", SUMMARY),
+            "raw_content": format_result(SUMMARY, "drive_summarize"),
+            "_watcher_command": "drive_summarize",
+        },
+    ]
+
+
+@pytest.mark.parametrize(
+    "command,result",
+    [
+        ("drive_list", FOLDER_LISTING),
+        ("drive_summarize", SUMMARY),
+        ("drive_upload", "**UPLOADED** — the document is now in the Drive folder."),
+    ],
+)
+def test_drive_results_reach_the_reader_intact(command, result):
+    """These are the answer the user asked for, not plumbing behind one."""
+    assert is_shared_result(command)
+    assert condense_result(command, result) == result
+
+
+def test_the_model_also_gets_the_drive_result():
+    """Shared, not reader-facing: it has to be able to discuss what came back."""
+    rows = _apply_agent_redaction(summary_turn(), for_model=True)
+    assert "Mara refuses the lift" in rows[1]["content"]
+    assert "have not read it" not in rows[1]["content"]
+
+
+def test_a_summary_is_shown_to_the_reader_too():
+    rows = _apply_agent_redaction(summary_turn(), for_model=False)
+    assert "Mara refuses the lift" in rows[1]["content"]
+
+
+def test_a_drive_summary_is_never_mistaken_for_a_storage_proof():
+    """It names a storage id, and an id is not evidence of a write.
+
+    Only the **STORED** marker earns a proof line. Without this, every summary
+    would report itself to the reader as though something had just been saved.
+    """
+    out = condense_result("drive_summarize", SUMMARY)
+    assert not out.startswith("Proof:")
+
+
+@pytest.mark.parametrize(
+    "command,result",
+    [
+        ("drive_list", "[NOT CONFIGURED] drive_list: Google Drive is not connected."),
+        ("drive_summarize", "[ERROR] drive_summarize failed: no file with id 'x'."),
+        ("drive_upload", "[ERROR] drive_upload failed: Drive rejected the upload."),
+    ],
+)
+def test_a_failed_drive_call_is_still_one_sentence(command, result):
+    """Shared visibility applies to the answer, never to the diagnostics.
+
+    The detail still reaches the model, which is what lets it tell the user that
+    Drive needs connecting — in its own words, rather than by showing them a
+    [NOT CONFIGURED] string naming an environment variable.
+    """
+    out = condense_result(command, result)
+    assert out == failure_sentence(command)
+    assert "NOT CONFIGURED" not in out and "[ERROR]" not in out

@@ -243,9 +243,18 @@ _INDEX_SPECS: list[tuple[str, object, dict]] = [
     # entries. Titles are matched by regex alongside body text, which no index
     # helps with at these collection sizes.
     ("stored_documents", [("identity_id", 1), ("tags", 1)], {}),
+    # Google Drive authorisations in flight. TTL rather than a sweep: an
+    # abandoned consent screen leaves a state token behind, and it must stop
+    # being accepted whether or not anything ever looks at it again. The window
+    # matches STATE_TTL_SECONDS in falcon.google_drive, which also checks the age
+    # explicitly — Mongo's TTL monitor runs about once a minute, so the index
+    # bounds how long the row exists and the code bounds when it is honoured.
+    ("google_oauth_state", "created_at", {"expireAfterSeconds": 600}),
+    ("google_oauth_state", "state", {"unique": True}),
 ]
 # Lumen Guard needs no index: it keeps two documents in lumen_state, both
-# addressed by _id.
+# addressed by _id. The Drive credential is likewise a single document in
+# google_drive_auth, addressed by _id.
 
 
 def _ensure_indexes_async(db: Database) -> None:

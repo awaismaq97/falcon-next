@@ -3,8 +3,8 @@
 /**
  * LumenGuardTab — is each part of the system working?
  *
- * One row per check: database, auth, watcher, tools, persona, storage,
- * workers. Green means verified working just now, amber means working but
+ * One row per check: database, auth, watcher, tools, persona, storage, backup,
+ * Google Drive, workers. Green means verified working just now, amber means working but
  * something is off, red means not working. Details are one click away and
  * collapsed by default, because the answer to "is it working" should be
  * readable without reading anything.
@@ -47,6 +47,7 @@ const TITLE: Record<string, string> = {
   persona: "Watcher persona",
   storage: "Document storage",
   backup: "Weekly backup",
+  drive: "Google Drive",
   workers: "Background workers",
 };
 

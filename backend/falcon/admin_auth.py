@@ -164,6 +164,37 @@ def decrypt_username(token: str) -> str:
         raise ValueError(f"Username decryption failed: {exc}") from exc
 
 
+def encrypt_secret(plaintext: str, *, purpose: bytes) -> str:
+    """Encrypt an arbitrary secret at rest under its own derived key.
+
+    ``purpose`` is the HKDF ``info`` label and is what keeps one stored secret
+    from being decryptable with another's key — a Google refresh token and a
+    username are encrypted under independent keys derived from the same
+    SECRET_KEY, so neither ciphertext can be swapped for the other.
+
+    Used for third-party credentials the server holds on the user's behalf and
+    must be able to read back (a Drive refresh token), which is why this is
+    reversible encryption rather than a hash.
+    """
+    return _encrypt_with(_derive(purpose), plaintext)
+
+
+def decrypt_secret(token: str, *, purpose: bytes) -> str:
+    """Reverse :func:`encrypt_secret`. Raises ValueError on failure.
+
+    A failure here usually means SECRET_KEY changed since the secret was
+    written, so the message says that rather than leaving the caller guessing.
+    """
+    try:
+        return _decrypt_with(_derive(purpose), token)
+    except Exception as exc:
+        raise ValueError(
+            f"Stored secret could not be decrypted: {exc}. This normally means "
+            "SECRET_KEY has changed since it was saved — the secret has to be "
+            "re-entered."
+        ) from exc
+
+
 def decrypt_username_legacy(token: str) -> str:
     """Decrypt a token written under the pre-HKDF key. Migration only.
 

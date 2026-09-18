@@ -1296,6 +1296,22 @@ def _read_document(payload: str) -> str:
     storage_id = parts[0]
     want_full = any(p.lower() in ("full", "text", "all", "--full") for p in parts[1:])
 
+    # A Google Drive file id, handed to the wrong tool. Worth detecting rather
+    # than letting it fall through to "no stored document with that id", because
+    # that message is true, unhelpful, and describes the wrong problem — the id
+    # is real, it just belongs to a different store. The user asking to "read"
+    # something is what causes this: the word points straight at this tool, and
+    # a Drive id looks enough like an opaque handle to pass without question.
+    if not _DOC_ID_RE.fullmatch(storage_id) and _DRIVE_ID_RE.match(storage_id):
+        return (
+            f"[ERROR] {storage_id!r} is a Google Drive file id, not a storage id. This "
+            "command only reads documents already stored here, whose ids look like "
+            "doc_a1b2c3d4e5f6.\n"
+            f"Use drive_summarize with that id instead — it reads the document from "
+            "Drive and returns its key points. Its result also carries a storage id, "
+            "and read_document works on that if the user then wants the document itself."
+        )
+
     identity = current_identity()
     doc = Store.get(storage_id, identity)
     if not doc:
@@ -1865,6 +1881,524 @@ def _spawn_agent(payload: str) -> str:
     Returns JSON: {"status": "ok"|"error", "agent_id": "<tool_name>", "message": "..."}
     """
     return json.dumps(spawn_agent(payload))
+
+
+# ---------------------------------------------------------------------------
+# Google Drive — list, summarize, upload
+# ---------------------------------------------------------------------------
+#
+# Three tools over one folder. The shape of each is decided by one rule: a
+# document's text never goes into the chat unless the user asked for the text.
+#
+# That is not a style preference. These documents are manuscripts, reports and
+# notes — a single one can be longer than the model's whole context, so putting
+# one in the conversation costs the rest of the turn, and putting one on screen
+# buries every other message in the thread. So drive_summarize answers with
+# bullets, and the full text is reachable only through an explicit `full`, which
+# the persona tells the model to use only when the user asks for the document
+# itself in as many words.
+#
+# The storage id in every result is what makes that liveable rather than
+# restrictive: the text is saved locally on the way past, so "show me the whole
+# thing" is `read_document <id>` — the tool that already exists for handing a
+# document to a reader, with the delivery and size handling already worked out.
+
+# A Drive file id: opaque, url-safe, and always well past fifteen characters. Used
+# to tell "summarise this id" from "summarise the thing called Chapter Three"
+# without asking the model to label which one it meant.
+_DRIVE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{15,}$")
+
+# The trailing word that asks for the document itself instead of a summary.
+_FULL_RE = re.compile(r"\s+(full|full text|whole|entire)\s*$", re.I)
+
+# How much of a document's text drive_summarize will put in the chat when `full`
+# is given. Past this the summary plus a storage id is the answer, because a
+# result this long stops being readable in a chat bubble at all.
+_DRIVE_FULL_MAX_CHARS = 60_000
+
+
+def _drive_identity() -> str:
+    """The identity a Drive tool acts for, refusing to run unscoped.
+
+    Storage is per identity, so an empty value would mean saving a document
+    nobody owns and listing documents belonging to everyone. documents_store
+    already refuses it; catching it here says something the user can act on.
+    """
+    identity = current_identity()
+    if not identity:
+        raise ValueError(
+            "no identity is set for this run, so there is nowhere to file the document"
+        )
+    return identity
+
+
+def _drive_error(command: str, exc: Exception) -> str:
+    """One failure string for the whole Drive family.
+
+    NotConnected is separated out because it is the one failure with a specific
+    fix that is not "try again" — and [NOT CONFIGURED] is what the watcher log
+    and Lumen Guard already use for a credential that was never supplied.
+    """
+    from falcon.google_drive import NotConnected
+
+    if isinstance(exc, NotConnected):
+        return f"[NOT CONFIGURED] {command}: {exc}"
+    return f"[ERROR] {command} failed: {exc}"
+
+
+def _fmt_size(value) -> str:
+    try:
+        size = int(value or 0)
+    except (TypeError, ValueError):
+        return "—"
+    if not size:
+        return "—"
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:,.0f} KB"
+    return f"{size / 1048576:.1f} MB"
+
+
+def _drive_kind(mime: str) -> str:
+    """A short human word for a Drive MIME type."""
+    from falcon.google_drive import FOLDER_TYPE
+
+    return {
+        FOLDER_TYPE: "folder",
+        "application/vnd.google-apps.document": "Google Doc",
+        "application/vnd.google-apps.spreadsheet": "Google Sheet",
+        "application/vnd.google-apps.presentation": "Google Slides",
+        "application/pdf": "PDF",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "Word",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "Excel",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation": "PowerPoint",
+    }.get(mime, (mime or "file").rsplit(".", 1)[-1].rsplit("/", 1)[-1])
+
+
+@register_tool("drive_list")
+def _drive_list(payload: str) -> str:
+    """List the documents in the Google Drive folder, with their file ids.
+
+    Payload: empty for the whole folder, a search term to narrow it, or a folder
+    id to look inside a subfolder.
+
+    The ids this returns are what drive_summarize takes, which is the whole point
+    of the tool — it is the index, not the content.
+    """
+    import falcon.google_drive as Drive
+
+    raw = (payload or "").strip()
+    folder = ""
+    term = ""
+    if _DRIVE_ID_RE.match(raw):
+        folder = raw
+    else:
+        term = raw
+
+    try:
+        files = Drive.list_documents(folder=folder, term=term)
+        target = Drive.resolve_folder(folder)
+        folder_name = Drive.get_metadata(target, fields="id, name").get("name", "")
+    except Exception as exc:  # noqa: BLE001
+        logger.error("drive_list: %s", exc)
+        return _drive_error("drive_list", exc)
+
+    where = f"**{_md(folder_name)}**" if folder_name else "the Drive folder"
+    if not files:
+        if term:
+            return f"No documents in {where} match “{_md(term)}”."
+        return (
+            f"{where} has no readable documents in it. Readable means Google Docs, "
+            "Sheets and Slides, PDF, Word, Excel, PowerPoint, or a plain-text format — "
+            "anything else in the folder is not listed."
+        )
+
+    from falcon.google_drive import FOLDER_TYPE
+
+    docs = [f for f in files if f.get("mimeType") != FOLDER_TYPE]
+    folders = [f for f in files if f.get("mimeType") == FOLDER_TYPE]
+
+    n = len(docs)
+    lines = [
+        f"**{n} document{'s' if n != 1 else ''} in {where}"
+        + (f" matching “{_md(term)}”" if term else "")
+        + "**",
+        "",
+    ]
+
+    if docs:
+        lines += [
+            "| Document | File ID | Type | Size | Modified |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+        for f in docs:
+            modified = (f.get("modifiedTime") or "")[:10]
+            lines.append(
+                f"| {_md(f.get('name', 'untitled'))} | `{f.get('id', '')}` "
+                f"| {_drive_kind(f.get('mimeType', ''))} | {_fmt_size(f.get('size'))} "
+                f"| {modified or '—'} |"
+            )
+
+    if folders:
+        lines += ["", "**Subfolders** — pass one of these ids back to drive_list:", ""]
+        for f in folders:
+            lines.append(f"- {_md(f.get('name', 'untitled'))} — `{f.get('id', '')}`")
+
+    lines += [
+        "",
+        "Use `drive_summarize` with a file id to get that document's key points. It "
+        "returns bullets, not the document — the text stays out of the chat unless "
+        "the user asks for it.",
+    ]
+    return "\n".join(lines)
+
+
+def _resolve_drive_target(reference: str, identity: str) -> dict:
+    """Work out which document ``reference`` means. Returns a resolution dict.
+
+    Three shapes are accepted because all three are things a user says: a storage
+    id they were given earlier, a Drive file id from drive_list, or the document's
+    name. The name path is the one worth being careful with — resolving an
+    ambiguous name to "probably this one" would summarise the wrong document and
+    look exactly like success, so several matches is reported back as a question
+    rather than guessed at.
+
+    Returns ``{"kind": "stored"|"drive"|"ambiguous"|"missing", ...}``.
+    """
+    import falcon.google_drive as Drive
+    from falcon import documents_store as Store
+
+    reference = (reference or "").strip()
+
+    # 1. A storage id: already local, no Drive call needed.
+    if _DOC_ID_RE.fullmatch(reference):
+        doc = Store.get(reference.lower(), identity)
+        if doc:
+            return {"kind": "stored", "doc": doc}
+        return {
+            "kind": "missing",
+            "message": (
+                f"No stored document with id `{reference}`. Use list_documents to see "
+                "what is stored, or drive_list for what is in the Drive folder."
+            ),
+        }
+
+    # 2. A Drive file id.
+    if _DRIVE_ID_RE.match(reference):
+        return {"kind": "drive", "file_id": reference}
+
+    # 3. A name. Drive first, since these tools are about the folder.
+    matches = Drive.list_documents(term=reference, limit=25, include_folders=False)
+    if len(matches) == 1:
+        return {"kind": "drive", "file_id": matches[0]["id"], "name": matches[0].get("name", "")}
+    if len(matches) > 1:
+        exact = [m for m in matches if (m.get("name") or "").lower() == reference.lower()]
+        if len(exact) == 1:
+            return {"kind": "drive", "file_id": exact[0]["id"], "name": exact[0].get("name", "")}
+        listed = "\n".join(
+            f"- {_md(m.get('name', 'untitled'))} — `{m.get('id', '')}`" for m in matches[:10]
+        )
+        return {
+            "kind": "ambiguous",
+            "message": (
+                f"{len(matches)} documents in the Drive folder match “{_md(reference)}”. "
+                f"Ask which one, then call drive_summarize with its id:\n\n{listed}"
+            ),
+        }
+
+    # 4. Nothing in Drive — it may be something stored locally instead.
+    local = Store.search(identity, reference, limit=5)
+    if len(local) == 1:
+        return {"kind": "stored", "doc": Store.get(local[0]["storage_id"], identity)}
+    if len(local) > 1:
+        listed = "\n".join(
+            f"- {_md(Store.display_name(d))} — `{d['storage_id']}`" for d in local
+        )
+        return {
+            "kind": "ambiguous",
+            "message": (
+                f"Nothing in the Drive folder matches “{_md(reference)}”, but "
+                f"{len(local)} stored documents do. Ask which one:\n\n{listed}"
+            ),
+        }
+
+    return {
+        "kind": "missing",
+        "message": (
+            f"Nothing called “{_md(reference)}” is in the Drive folder or in storage. "
+            "Run drive_list to see what is actually there — do not guess at another name."
+        ),
+    }
+
+
+@register_tool("drive_summarize")
+def _drive_summarize(payload: str) -> str:
+    """Read a document and return its key points as bullets. Never dumps the text.
+
+    Payload: a Drive file id, a `doc_…` storage id, or the document's name on the
+    first line. Anything on the following lines is treated as a focus for the
+    summary. Append ``full`` to the first line to get the document's text instead
+    of a summary — only when the user has asked for the document itself.
+    """
+    import falcon.google_drive as Drive
+    from falcon import doc_summary as Summary
+    from falcon import documents_store as Store
+
+    raw = (payload or "").strip()
+    if not raw:
+        return (
+            "[ERROR] drive_summarize needs a document. Give it a Drive file id from "
+            "drive_list, a doc_ storage id, or the document's name."
+        )
+
+    head, _, rest = raw.partition("\n")
+    focus = rest.strip()
+
+    want_full = False
+    match = _FULL_RE.search(head)
+    if match:
+        want_full = True
+        head = head[: match.start()].strip()
+    reference = head.strip().strip("`\"'")
+
+    if not reference:
+        return "[ERROR] drive_summarize needs a document id or name, not just 'full'."
+
+    try:
+        identity = _drive_identity()
+        resolved = _resolve_drive_target(reference, identity)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("drive_summarize: resolving %r failed: %s", reference, exc)
+        return _drive_error("drive_summarize", exc)
+
+    if resolved["kind"] in ("ambiguous", "missing"):
+        # Not an [ERROR]: the tool worked and this is its answer. The model needs
+        # to read it and ask the user, which an error string would discourage.
+        return resolved["message"]
+
+    # ── Get the text ──────────────────────────────────────────────────────
+    storage_id = ""
+    source_note = ""
+    try:
+        if resolved["kind"] == "stored":
+            doc = resolved["doc"]
+            title = Store.display_name(doc)
+            text = doc.get("text", "")
+            storage_id = doc["storage_id"]
+            source_note = "stored document"
+        else:
+            fetched = Drive.download_text(resolved["file_id"])
+            title = fetched["name"]
+            text = fetched["text"]
+            source_note = f"Google Drive · {_drive_kind(fetched['mime_type'])}"
+
+            # Saved on the way past, so the same document is not downloaded and
+            # re-parsed every time it is mentioned, and so `read_document` can
+            # hand over the full text later without touching Drive at all.
+            # Deduplicated by content hash, so re-summarising costs one update.
+            try:
+                saved = Store.save(
+                    identity,
+                    title,
+                    text,
+                    source="drive",
+                    kind="drive",
+                    title=title,
+                    tags=["drive"],
+                    meta={"drive_file_id": fetched["id"], "drive_mime_type": fetched["mime_type"]},
+                )
+                storage_id = saved.get("storage_id", "") if saved.get("ok") else ""
+            except Exception as exc:  # noqa: BLE001
+                # The summary is the deliverable; failing to cache it is not worth
+                # losing the read over.
+                logger.warning("drive_summarize: could not store %r: %s", title, exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("drive_summarize: reading %r failed: %s", reference, exc)
+        return _drive_error("drive_summarize", exc)
+
+    # ── The explicit full-text path ───────────────────────────────────────
+    if want_full:
+        if len(text) > _DRIVE_FULL_MAX_CHARS:
+            return (
+                f"### {title}\n\n"
+                f"This document is {len(text):,} characters — too long to put in the chat "
+                f"in one piece (the limit here is {_DRIVE_FULL_MAX_CHARS:,}).\n\n"
+                + (
+                    f"It is stored as `{storage_id}`. Use `read_document {storage_id}` to "
+                    "deliver it to the user properly, which handles a document of any size.\n\n"
+                    if storage_id else ""
+                )
+                + "Summary of it instead:\n\n"
+                + _tidy_or_blank(Summary, text, title, focus)
+            )
+        lines = [f"### {title}", "", f"**Full text** — {len(text):,} characters, {source_note}"]
+        if storage_id:
+            lines.append(f"**Storage id:** `{storage_id}`")
+        lines += ["", _fence(text)]
+        return "\n".join(lines)
+
+    # ── The default: bullets ──────────────────────────────────────────────
+    try:
+        result = Summary.summarize(text, title=title, focus=focus)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("drive_summarize: summarising %r failed: %s", title, exc)
+        return (
+            f"[ERROR] drive_summarize read {title!r} but could not summarise it: {exc}\n"
+            "The document was read; only the summary failed."
+        )
+
+    lines = [f"### {title}", ""]
+    meta = [source_note, f"{len(text):,} characters"]
+    if result["chunks"] > 1:
+        meta.append(f"{result['chunks']} sections")
+    lines.append("_" + " · ".join(m for m in meta if m) + "_")
+    if focus:
+        lines.append(f"_Focused on: {_md(focus)}_")
+    lines += ["", result["bullets"]]
+
+    if storage_id:
+        lines += [
+            "",
+            f"Stored as `{storage_id}`. If the user asks to see the document itself, "
+            f"run `read_document {storage_id}` — do not paste its text into a reply.",
+        ]
+    return "\n".join(lines)
+
+
+def _tidy_or_blank(Summary, text: str, title: str, focus: str) -> str:
+    """Summarise, degrading to a plain sentence instead of raising."""
+    try:
+        return Summary.summarize(text, title=title, focus=focus)["bullets"]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("drive_summarize: fallback summary failed for %r: %s", title, exc)
+        return "_The summary could not be generated._"
+
+
+@register_tool("drive_upload")
+def _drive_upload(payload: str) -> str:
+    """Upload a stored document to the Google Drive folder.
+
+    Payload: a `doc_…` storage id, or the document's name.
+
+    Uploads the original file when one was kept — the PDF as a PDF — and the
+    stored text as a .txt when there is no original, which is the case for
+    anything written with library_store. Always creates a new file; nothing in
+    Drive is ever overwritten or replaced, and no sharing permission is set.
+    """
+    import falcon.google_drive as Drive
+    from falcon import documents_store as Store
+
+    reference = (payload or "").strip().strip("`\"'")
+    if not reference:
+        return (
+            "[ERROR] drive_upload needs the document to upload — a doc_ storage id, or "
+            "its name. Run list_documents to find the id of the one the user means."
+        )
+
+    try:
+        identity = _drive_identity()
+    except ValueError as exc:
+        return f"[ERROR] drive_upload: {exc}"
+
+    # Resolved against local storage only. Uploading takes something already in
+    # the library and puts a copy in Drive; a Drive file id here would mean
+    # copying a file onto itself, which is never what was asked.
+    doc = None
+    if _DOC_ID_RE.fullmatch(reference):
+        doc = Store.get(reference.lower(), identity)
+        if not doc:
+            return (
+                f"[ERROR] No stored document with id `{reference}` for this identity. "
+                "Use list_documents to find the right id."
+            )
+    else:
+        matches = Store.search(identity, reference, limit=5)
+        if not matches:
+            return (
+                f"[ERROR] Nothing stored here matches “{_md(reference)}”. Only documents "
+                "already in the library can be uploaded — run list_documents to see them."
+            )
+        if len(matches) > 1:
+            exact = [m for m in matches if Store.display_name(m).lower() == reference.lower()]
+            if len(exact) != 1:
+                listed = "\n".join(
+                    f"- {_md(Store.display_name(m))} — `{m['storage_id']}`" for m in matches
+                )
+                return (
+                    f"{len(matches)} stored documents match “{_md(reference)}”. Ask the user "
+                    f"which one to upload, then call drive_upload with its id:\n\n{listed}"
+                )
+            matches = exact
+        doc = Store.get(matches[0]["storage_id"], identity)
+
+    if not doc:
+        return f"[ERROR] drive_upload could not load {reference!r} from storage."
+
+    name = Store.display_name(doc)
+
+    # The original when there is one, the extracted text otherwise. Uploading a
+    # PDF's extraction in place of the PDF would quietly downgrade the file, so
+    # the two cases are distinguished in the result as well as in the code.
+    blob = Store.get_file(doc["storage_id"], identity) if doc.get("file_id") else None
+    if blob:
+        data = blob["data"]
+        content_type = blob["content_type"]
+        upload_name = blob["filename"] or name
+        what = "the original file"
+    else:
+        text = doc.get("text", "")
+        if not text.strip():
+            return f"[ERROR] {name!r} has no file and no text — there is nothing to upload."
+        data = text.encode("utf-8")
+        content_type = "text/plain; charset=utf-8"
+        upload_name = name if name.lower().endswith(".txt") else f"{name}.txt"
+        what = "the stored text as a .txt (no original file was kept for this entry)"
+
+    try:
+        created = Drive.upload(data, upload_name, content_type=content_type)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("drive_upload: uploading %r failed: %s", name, exc)
+        return _drive_error("drive_upload", exc)
+
+    # Recorded on the stored document so a later "is this already on Drive?" is
+    # answerable without searching the folder. Capped at ten, because the useful
+    # fact is "yes, and here is the most recent one" rather than a full history.
+    try:
+        from falcon.db import get_db
+
+        meta = dict(doc.get("meta") or {})
+        meta["drive_uploads"] = (meta.get("drive_uploads") or [])[-9:] + [
+            {"file_id": created["id"], "name": created["name"], "at": _utc_iso_now()}
+        ]
+        get_db()["stored_documents"].update_one(
+            {"storage_id": doc["storage_id"]}, {"$set": {"meta": meta}}
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("drive_upload: could not record the upload on %s: %s", doc["storage_id"], exc)
+
+    lines = [
+        "**UPLOADED** — the document is now in the Drive folder.",
+        "",
+        f"- **Name:** {_md(created['name'])}",
+        f"- **Drive file id:** `{created['id']}`",
+        f"- **Size:** {_fmt_size(created['bytes'])}",
+        f"- **From:** `{doc['storage_id']}` — uploaded {what}",
+    ]
+    if created.get("link"):
+        lines.append(f"- **Open in Drive:** {created['link']}")
+    lines += [
+        "",
+        "It is private: it inherits the folder's access and no sharing link was created. "
+        "Tell the user it is uploaded and name the file — there is nothing else to report.",
+    ]
+    return "\n".join(lines)
+
+
+def _utc_iso_now() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 # ---------------------------------------------------------------------------

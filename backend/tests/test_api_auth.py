@@ -47,6 +47,11 @@ PUBLIC = {
     "/health",                                        # liveness probe
     "/api/admin/login",                               # issues the token
     "/api/identities/{identity_id}/watcher/stream",   # EventSource; checks its own
+    # Google redirects a browser here after the consent screen, and a redirect
+    # carries no Authorization header. The single-use `state` minted by
+    # /api/drive/connect is what authenticates it — see the test below, which is
+    # what this entry is allowed to exist on the strength of.
+    "/api/drive/callback",
 }
 
 # Placeholders filled in to make a concrete URL. The values are deliberately
@@ -199,3 +204,46 @@ def test_watcher_stream_refuses_an_anonymous_or_foreign_listener(client):
     assert client.get(
         f"/api/identities/bob/watcher/stream?token={alice}"
     ).status_code == 403
+
+
+def test_drive_callback_refuses_a_state_it_did_not_issue(client):
+    """The one bare route besides the stream, and what stands in for its token.
+
+    The callback cannot require a bearer token — Google redirects a browser into
+    it. So the guarantee is that it completes only a flow this server started: a
+    `state` value it minted and stored, used once, within ten minutes. Without a
+    matching one there is nothing to complete and no credential is stored.
+
+    The unknown-state case matters most, because it proves the state is checked
+    *before* the authorisation code is sent to Google. If the order were the other
+    way round, anyone who could reach this URL could drive a token exchange.
+    """
+    import falcon.google_drive as Drive
+
+    # Missing entirely.
+    assert client.get("/api/drive/callback").status_code == 400
+    # The user pressed Cancel on the consent screen.
+    assert client.get("/api/drive/callback?error=access_denied").status_code == 400
+    # A code with a state this server never issued: refused without reaching
+    # Google, which is why this passes with no network and no credentials set.
+    r = client.get("/api/drive/callback?code=4/fake-auth-code&state=never-issued")
+    assert r.status_code == 400
+    assert "not one this server issued" in r.text
+
+    assert not Drive.connected(), "a refused callback must not store a credential"
+
+
+def test_drive_management_routes_are_admin_only(client):
+    """A portal user cannot connect, disconnect or inspect the shared credential.
+
+    The connection is deployment-wide rather than per-user, so a portal user
+    reaching /drive/disconnect would take Drive away from everyone.
+    """
+    for method, path in (
+        ("get", "/api/drive/status"),
+        ("post", "/api/drive/connect"),
+        ("post", "/api/drive/disconnect"),
+        ("post", "/api/drive/check"),
+    ):
+        r = client.request(method.upper(), path, headers=token("alice"))
+        assert r.status_code == 403, f"{method.upper()} {path} -> {r.status_code}"

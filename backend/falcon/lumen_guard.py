@@ -2,10 +2,11 @@
 lumen_guard.py — Lumen Guard: a health monitor for the running system.
 
 It answers one question, continuously: is each part of Falcon working and
-intact? Database, auth, watcher, tools, persona, storage, the weekly backup, and
-the background workers. Each check runs a real operation rather than reading a
-flag — a database that answers a ping but cannot complete a write is not
-working, a watcher that is enabled but has no thread is not running, and a
+intact? Database, auth, watcher, tools, persona, storage, Google Drive, the
+weekly backup, and the background workers. Each check runs a real operation
+rather than reading a flag — a database that answers a ping but cannot complete
+a write is not working, a watcher that is enabled but has no thread is not
+running, a Drive credential that is stored may still have been revoked, and a
 backup whose snapshot database is empty has not been taken however successful
 its last run claims to be.
 
@@ -420,6 +421,72 @@ def _check_backup() -> dict:
                    f"Last backup {facts['last_success']} ({age_days:.1f} days ago), "
                    f"{snapshot_collections} collections in {target}. Next due in "
                    f"{due_in:.1f} days.", facts)
+
+
+@check("drive")
+def _check_drive() -> dict:
+    """Is Google Drive still connected — and keep it from lapsing while asking.
+
+    The check is a real token refresh rather than a look at a stored flag,
+    because the failure worth catching is a credential that has been revoked or
+    has expired, and both of those look perfectly healthy from the database.
+
+    Doing it on a timer has a second effect that matters as much as the first: a
+    refresh is *use* of the refresh token, and an unused one expires after six
+    months. A deployment that is monitored therefore never reaches that cutoff,
+    so "connected once, connected for good" holds without anyone maintaining it.
+    """
+    import falcon.google_drive as Drive
+
+    st = Drive.status()
+    facts: dict[str, Any] = {
+        "configured": st["configured"],
+        "connected": st["connected"],
+        "account": st["account_email"],
+        "folder_id": st["folder_id"],
+        "scopes": st["scopes"],
+    }
+
+    if not st["configured"]:
+        # Not an outage. Drive is optional, and a deployment that never set it up
+        # is working exactly as configured — warn so it is visible, never down.
+        return _result("drive", WARN,
+                       "Google Drive is not configured: " + (st["problems"][0] if st["problems"]
+                                                             else "no client credentials."),
+                       facts)
+
+    if not st["connected"]:
+        return _result("drive", WARN,
+                       "Google Drive is configured but not connected. An admin needs to "
+                       "connect it once from the admin panel; the Drive agents fail until "
+                       "then.", facts)
+
+    if st["folder_changed_since_connect"]:
+        return _result("drive", WARN,
+                       "GOOGLE_DRIVE_FOLDER_ID has changed since Drive was connected. The "
+                       "grant may not cover the new folder — run a check, and reconnect if "
+                       "it fails.", facts)
+
+    try:
+        probe = Drive.probe()
+    except Drive.NotConnected as exc:
+        facts["error"] = str(exc)
+        return _result("drive", DOWN,
+                       f"The stored Google credential no longer works: {exc}", facts)
+    except Drive.DriveError as exc:
+        facts["error"] = str(exc)
+        return _result("drive", DOWN,
+                       f"Google Drive is connected but not reachable: {exc}", facts)
+
+    facts["folder_name"] = probe.get("folder_name", "")
+    facts["folder_verified_this_run"] = probe.get("folder_checked", False)
+    if st.get("last_refresh_at"):
+        facts["last_refresh"] = st["last_refresh_at"]
+
+    where = probe.get("folder_name") or st["folder_id"]
+    return _result("drive", OK,
+                   f"Connected as {st['account_email'] or 'the authorised account'}, "
+                   f"token refreshing, folder {where!r} reachable.", facts)
 
 
 @check("workers")

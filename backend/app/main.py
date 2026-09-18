@@ -257,6 +257,7 @@ def create_app() -> FastAPI:
         chat,
         config as config_router,
         documents,
+        drive as drive_router,
         dual_run,
         identities,
         lumen,
@@ -303,6 +304,11 @@ def create_app() -> FastAPI:
     # route reads its token from the query string and checks it itself.
     app.include_router(watcher_router.stream_router, prefix=prefix)
     app.include_router(lumen.router, prefix=prefix, dependencies=protected)
+    app.include_router(drive_router.router, prefix=prefix, dependencies=protected)
+    # Also mounted bare, for the same reason as the watcher stream: Google
+    # redirects a browser here and a redirect carries no Authorization header.
+    # The single-use `state` issued by /drive/connect is what authenticates it.
+    app.include_router(drive_router.callback_router, prefix=prefix)
 
     return app
 
